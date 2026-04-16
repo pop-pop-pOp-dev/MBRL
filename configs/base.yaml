@@ -98,3 +98,16 @@ training:
     random_phase: 0.30
   offline_epsilon: 0.1
   flow_perturbation_levels: [0.0]
+
+decision:
+  enabled: true
+  eval_enabled: true
+  mode: sequence_shooting
+  candidate_count: 4
+  plan_count: 4
+  include_greedy: true
+  horizon: 3
+  discount: 0.99
+  uncertainty_coef: 0.1
+  pessimism_coef: 0.25
+  future_action_mode: greedy

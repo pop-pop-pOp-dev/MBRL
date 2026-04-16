@@ -10,6 +10,7 @@ A CityFlow-based traffic signal control project using a hardened uncertainty-awa
 - Policy: `PPO`
 - World model: `GAT + action fusion + GRU` with multi-step consistent training
 - Uncertainty: ensemble variance gate plus ranked/pessimistic imagined sample selection
+- Decision-level enhancement: sequence-shooting style candidate plan reranking with short pessimistic imagined return
 - Positioning: hardened route-1 traffic MBPO, not MPC or shooting-based planning
 
 ## Layout
@@ -19,7 +20,7 @@ A CityFlow-based traffic signal control project using a hardened uncertainty-awa
 - `src/env/`: CityFlow env, observation, reward, and phase control
 - `src/models/`: encoder, policy/value heads, dynamics, uncertainty
 - `src/rl/`: multi-discrete PPO
-- `src/training/`: offline pretrain, world model, replay, sample selection, and MBRL training
+- `src/training/`: offline pretrain, world model, replay, sample selection, decision selector, and MBRL training
 - `src/eval/`: evaluation, generalization, and robustness
 - `scripts/`: runnable entrypoints
 - `tests/`: unit tests
@@ -40,6 +41,7 @@ python3 scripts/evaluate.py --config configs/experiments/fuhua_mbrl_ppo.yaml
 - Prioritized and coverage-aware imagined sample selection
 - Config-driven model start-state strategy and rollout schedule
 - Threshold-ranked and pessimistic uncertainty usage for imagined data retention
+- Decision-aware action-sequence shooting with short model rollout and first-action execution
 - Still route-1 MBPO/Dyna style, not planner-based control
 
 ## Recommended ablations

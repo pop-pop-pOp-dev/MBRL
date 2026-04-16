@@ -14,12 +14,12 @@ from src.models.policy_head import MultiDiscretePolicy
 from src.models.uncertainty_ensemble import DynamicsEnsemble
 from src.models.value_head import GraphValueHead
 from src.rl.ppo_multidiscrete import TrajectoryStep, update_ppo
+from src.training.decision_selector import select_action_with_world_model
 from src.training.offline_pretrain import behavior_clone_policy, collect_offline_transitions
 from src.training.replay_buffer import SplitReplayBuffer
 from src.training.sample_selection import select_model_samples
 from src.training.train_world_model import build_ensemble, train_world_model, save_ensemble
 from src.utils.seed import seed_everything
-
 
 
 def _to_device_obs(obs: dict, device: torch.device):
@@ -31,7 +31,6 @@ def _to_device_obs(obs: dict, device: torch.device):
     )
 
 
-
 def _build_action_mask_from_state(state: torch.Tensor, action_space_n: int, observation_spec) -> torch.Tensor:
     mask = torch.ones(state.size(0), action_space_n, device=state.device)
     latest = observation_spec.latest_dynamic(state)
@@ -41,7 +40,6 @@ def _build_action_mask_from_state(state: torch.Tensor, action_space_n: int, obse
     return mask
 
 
-
 def _make_synthetic_reward_fn(cfg: Dict[str, Any], observation_spec):
     reward_cfg = cfg.get('env', {}).get('reward', {})
     def _reward(prev_state: torch.Tensor, next_state: torch.Tensor, actions: torch.Tensor):
@@ -49,41 +47,69 @@ def _make_synthetic_reward_fn(cfg: Dict[str, Any], observation_spec):
     return _reward
 
 
-
-def _collect_real_trajectory(env: CityFlowSignalEnv, policy: MultiDiscretePolicy, value_net: GraphValueHead, device: torch.device) -> List[TrajectoryStep]:
+def _collect_real_trajectory(
+    env: CityFlowSignalEnv,
+    policy: MultiDiscretePolicy,
+    value_net: GraphValueHead,
+    device: torch.device,
+    ensemble: DynamicsEnsemble | None = None,
+    decision_cfg: Dict[str, Any] | None = None,
+    observation_spec=None,
+    reward_fn=None,
+) -> List[TrajectoryStep]:
     obs, _ = env.reset()
     trajectory: List[TrajectoryStep] = []
     terminated = False
     while not terminated:
         node_x, edge_index, edge_attr, action_mask = _to_device_obs(obs, device)
+        decision_info = None
         with torch.no_grad():
-            policy_out = policy.sample(node_x, edge_index, edge_attr, action_mask)
-            value = float(value_net(node_x, edge_index, edge_attr).item())
-        action_np = policy_out.actions.detach().cpu().numpy()
+            if ensemble is not None and decision_cfg and bool(decision_cfg.get('enabled', False)):
+                selection = select_action_with_world_model(
+                    policy=policy,
+                    value_net=value_net,
+                    ensemble=ensemble,
+                    node_x=node_x,
+                    edge_index=edge_index,
+                    edge_attr=edge_attr,
+                    action_mask=action_mask,
+                    observation_spec=observation_spec,
+                    reward_fn=reward_fn,
+                    action_mask_fn=lambda state: _build_action_mask_from_state(state, int(action_mask.shape[1]), observation_spec),
+                    cfg=decision_cfg,
+                )
+                action_tensor = selection.action
+                log_prob = selection.log_prob
+                value = selection.value
+                decision_info = selection
+            else:
+                policy_out = policy.sample(node_x, edge_index, edge_attr, action_mask)
+                action_tensor = policy_out.actions
+                log_prob = policy_out.log_prob
+                value = float(value_net(node_x, edge_index, edge_attr).item())
+        action_np = action_tensor.detach().cpu().numpy()
         next_obs, reward, terminated, truncated, _info = env.step(action_np)
-        next_node_x, _, _, next_action_mask = _to_device_obs(next_obs, device)
+        next_node_x, _, _, _next_action_mask = _to_device_obs(next_obs, device)
         with torch.no_grad():
             next_value = float(value_net(next_node_x, edge_index, edge_attr).item()) if not (terminated or truncated) else 0.0
-        trajectory.append(
-            TrajectoryStep(
-                state=obs['node_features'],
-                action_mask=obs['action_mask'],
-                action=action_np,
-                reward=float(reward),
-                done=float(terminated or truncated),
-                log_prob=float(policy_out.log_prob.detach().cpu().item()),
-                value=value,
-                next_state=next_obs['node_features'],
-                next_action_mask=next_obs['action_mask'],
-                next_value=next_value,
-                source='real',
-                uncertainty=0.0,
-            )
+        step = TrajectoryStep(
+            state=obs['node_features'],
+            action_mask=obs['action_mask'],
+            action=action_np,
+            reward=float(reward),
+            done=float(terminated or truncated),
+            log_prob=float(log_prob.detach().cpu().item()),
+            value=float(value),
+            next_state=next_obs['node_features'],
+            next_action_mask=next_obs['action_mask'],
+            next_value=next_value,
+            source='real',
+            uncertainty=float(getattr(decision_info, 'selected_uncertainty', 0.0)),
         )
+        trajectory.append(step)
         obs = next_obs
         terminated = bool(terminated or truncated)
     return trajectory
-
 
 
 def _step_to_transition(step: TrajectoryStep) -> Transition:
@@ -100,11 +126,9 @@ def _step_to_transition(step: TrajectoryStep) -> Transition:
     )
 
 
-
 def _queue_mean_from_transition(transition: Transition, observation_spec) -> float:
     metrics = observation_spec.metrics_from_state(transition.state)
     return float(np.mean(metrics.queue))
-
 
 
 def _select_start_transitions(
@@ -131,7 +155,6 @@ def _select_start_transitions(
     return replay.sample_real(model_start_count, strategy='random')
 
 
-
 def _select_model_transitions(
     transitions: Sequence[Transition],
     keep_count: int,
@@ -151,7 +174,6 @@ def _select_model_transitions(
     )
 
 
-
 def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     seed_everything(int(cfg.get('seed', 42)))
     device = torch.device(str(cfg.get('device', 'cpu')))
@@ -166,6 +188,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     ppo_cfg = cfg.get('ppo', {})
     train_cfg = cfg.get('training', {})
     dynamics_cfg = cfg.get('dynamics', {})
+    decision_cfg = dict(cfg.get('decision', {}))
 
     policy = MultiDiscretePolicy(
         input_dim=input_dim,
@@ -214,10 +237,22 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     metrics: List[Dict[str, float]] = []
     reward_fn = _make_synthetic_reward_fn(cfg, observation_spec)
     model_selection_strategy = str(train_cfg.get('model_selection_strategy', 'prioritized'))
+    decision_guidance_used = 0.0
     for update_idx in range(total_updates):
-        real_steps = _collect_real_trajectory(env, policy, value_net, device)
+        real_steps = _collect_real_trajectory(
+            env,
+            policy,
+            value_net,
+            device,
+            ensemble=ensemble,
+            decision_cfg=decision_cfg,
+            observation_spec=observation_spec,
+            reward_fn=reward_fn,
+        )
         for step in real_steps:
             replay.add_real(_step_to_transition(step))
+        if ensemble is not None and bool(decision_cfg.get('enabled', False)):
+            decision_guidance_used = 1.0
 
         generated_model_transitions: List[Transition] = []
         retention = 0.0
@@ -335,6 +370,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 'selected_start_state_count': float(train_cfg.get('model_start_state_count', 4)),
                 'start_state_queue_mean': start_queue_mean,
                 'model_selection_strategy': 1.0 if model_selection_strategy in {'prioritized', 'priority_coverage'} else 0.0,
+                'decision_guidance_enabled': decision_guidance_used,
             }
         )
 
