@@ -29,6 +29,22 @@ The result is a pragmatic middle route:
 - replay-based real/model sample mixing rather than naive synthetic append
 - lightweight decision-time control that allows the model to directly influence actions without requiring a full MPC stack
 
+## Statistical Scope
+
+This repository now keeps a cleaner algorithmic boundary between policy optimization and model augmentation:
+
+- PPO policy updates are applied only to the latest real on-policy rollout
+- imagined and replayed samples are used for model augmentation and auxiliary value updates
+- decision-time world-model guidance is controlled separately from training-time model augmentation
+
+This separation is intentional so that ablations such as:
+
+- `decision on / augmentation off`
+- `decision off / augmentation on`
+- `decision on / augmentation on`
+
+remain interpretable.
+
 ## Core Design
 
 ### 1. State and Action
@@ -163,6 +179,9 @@ The default config in `configs/base.yaml` already includes several important fam
   - sample priority weights
   - coverage bins
   - offline data mixture
+- `model_augmentation`
+  - enable or disable imagined training augmentation independently of decision-time guidance
+  - choose replay sampling strategies for real/model auxiliary batches
 - `decision`
   - enable decision-time model guidance
   - choose decision mode

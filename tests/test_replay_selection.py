@@ -32,8 +32,8 @@ def test_split_replay_buffer_ratio_sampling():
     for idx in range(4):
         replay.add_model(_make_transition(float(idx), 0.5))
     real_items, model_items = replay.sample_mixed_by_ratio(total_count=5, real_ratio=0.6, model_ratio=0.4)
-    assert len(real_items) >= 3
-    assert len(model_items) >= 2
+    assert len(real_items) == 3
+    assert len(model_items) == 2
 
 
 

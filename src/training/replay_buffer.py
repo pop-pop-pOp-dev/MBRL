@@ -66,18 +66,29 @@ class SplitReplayBuffer:
         model_strategy: str = 'random',
     ) -> tuple[List[T], List[T]]:
         total_count = max(int(total_count), 0)
+        if total_count == 0:
+            return [], []
         ratio_sum = max(float(real_ratio) + float(model_ratio), 1e-6)
         desired_real = int(total_count * float(real_ratio) / ratio_sum)
         desired_model = total_count - desired_real
-        real_items = self.sample_real(desired_real, strategy=real_strategy)
-        model_items = self.sample_model(desired_model, strategy=model_strategy)
-        shortfall = total_count - len(real_items) - len(model_items)
+
+        available_real = len(self.real_buffer)
+        available_model = len(self.model_buffer)
+        actual_real = min(desired_real, available_real)
+        actual_model = min(desired_model, available_model)
+        shortfall = total_count - actual_real - actual_model
+
         if shortfall > 0:
-            if len(real_items) < desired_real:
-                real_items.extend(self.sample_real(shortfall, strategy=real_strategy))
-            else:
-                model_items.extend(self.sample_model(shortfall, strategy=model_strategy))
-        return real_items[: max(desired_real, len(real_items))], model_items[: max(desired_model, len(model_items))]
+            real_extra = min(shortfall, max(available_real - actual_real, 0))
+            actual_real += real_extra
+            shortfall -= real_extra
+        if shortfall > 0:
+            model_extra = min(shortfall, max(available_model - actual_model, 0))
+            actual_model += model_extra
+
+        real_items = self.sample_real(actual_real, strategy=real_strategy)
+        model_items = self.sample_model(actual_model, strategy=model_strategy)
+        return real_items[:actual_real], model_items[:actual_model]
 
     def __len__(self) -> int:
         return len(self.real_buffer) + len(self.model_buffer)

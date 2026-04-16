@@ -13,7 +13,7 @@ from src.models.model_rollout import rollout_model
 from src.models.policy_head import MultiDiscretePolicy
 from src.models.uncertainty_ensemble import DynamicsEnsemble
 from src.models.value_head import GraphValueHead
-from src.rl.ppo_multidiscrete import TrajectoryStep, update_ppo
+from src.rl.ppo_multidiscrete import TrajectoryStep, update_ppo, update_value_with_mixed_batch
 from src.training.decision_selector import select_action_with_world_model
 from src.training.offline_pretrain import behavior_clone_policy, collect_offline_transitions
 from src.training.replay_buffer import SplitReplayBuffer
@@ -189,6 +189,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     train_cfg = cfg.get('training', {})
     dynamics_cfg = cfg.get('dynamics', {})
     decision_cfg = dict(cfg.get('decision', {}))
+    model_aug_cfg = dict(cfg.get('model_augmentation', {}))
 
     policy = MultiDiscretePolicy(
         input_dim=input_dim,
@@ -238,6 +239,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     reward_fn = _make_synthetic_reward_fn(cfg, observation_spec)
     model_selection_strategy = str(train_cfg.get('model_selection_strategy', 'prioritized'))
     decision_guidance_used = 0.0
+    augmentation_enabled = bool(model_aug_cfg.get('enabled', True))
     for update_idx in range(total_updates):
         real_steps = _collect_real_trajectory(
             env,
@@ -258,7 +260,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
         retention = 0.0
         start_queue_mean = 0.0
         start_strategy = str(train_cfg.get('model_start_state_strategy', 'real_buffer'))
-        if ensemble is not None and float(train_cfg.get('model_ratio', 0.3)) > 0.0 and len(replay.real_buffer) > 0:
+        if augmentation_enabled and ensemble is not None and float(train_cfg.get('model_ratio', 0.3)) > 0.0 and len(replay.real_buffer) > 0:
             model_start_count = max(1, int(train_cfg.get('model_start_state_count', 4)))
             start_transitions = _select_start_transitions(replay, strategy=start_strategy, model_start_count=model_start_count, observation_spec=observation_spec)
             if start_transitions:
@@ -315,25 +317,28 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
             for transition in selected_model_transitions:
                 replay.add_model(transition)
 
+        # Keep PPO policy updates on-policy: only the latest real rollout carries old log-probs from the behavior policy.
+        stats = update_ppo(policy, value_net, edge_index, edge_attr, real_steps, ppo_cfg, policy_opt, value_opt, device=device)
+
         batch_size = int(ppo_cfg.get('rollout_steps', 256))
         real_ratio = float(train_cfg.get('real_ratio', 0.7))
-        model_ratio = float(train_cfg.get('model_ratio', 0.3))
-        sampled_real, sampled_model = replay.sample_mixed_by_ratio(
-            total_count=batch_size,
-            real_ratio=real_ratio,
-            model_ratio=model_ratio,
-            real_strategy='random',
-            model_strategy='random',
-        )
+        model_ratio = float(train_cfg.get('model_ratio', 0.3)) if augmentation_enabled else 0.0
+        sampled_real: List[Transition] = []
+        sampled_model: List[Transition] = []
+        if augmentation_enabled:
+            sampled_real, sampled_model = replay.sample_mixed_by_ratio(
+                total_count=batch_size,
+                real_ratio=real_ratio,
+                model_ratio=model_ratio,
+                real_strategy=str(model_aug_cfg.get('real_strategy', 'random')),
+                model_strategy=str(model_aug_cfg.get('model_strategy', 'random')),
+            )
         mixed_transitions = list(sampled_real) + list(sampled_model)
         mixed_steps: List[TrajectoryStep] = []
         for transition in mixed_transitions:
             node_state = torch.tensor(transition.state, dtype=torch.float32, device=device)
             next_node_state = torch.tensor(transition.next_state, dtype=torch.float32, device=device)
-            action_mask_t = torch.tensor(transition.action_mask, dtype=torch.float32, device=device)
-            action_t = torch.tensor(transition.action, dtype=torch.long, device=device)
             with torch.no_grad():
-                log_prob, _ = policy.evaluate_actions(node_state, edge_index, edge_attr, action_mask_t, action_t)
                 value = float(value_net(node_state, edge_index, edge_attr).item())
                 next_value = 0.0 if float(transition.done) > 0.5 else float(value_net(next_node_state, edge_index, edge_attr).item())
             mixed_steps.append(
@@ -343,7 +348,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     action=transition.action,
                     reward=float(transition.reward),
                     done=float(transition.done),
-                    log_prob=float(log_prob.detach().cpu().item()),
+                    log_prob=0.0,
                     value=value,
                     next_state=transition.next_state,
                     next_action_mask=transition.next_action_mask,
@@ -352,11 +357,20 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     uncertainty=float(transition.uncertainty),
                 )
             )
-        stats = update_ppo(policy, value_net, edge_index, edge_attr, mixed_steps, ppo_cfg, policy_opt, value_opt, device=device)
+        aux_stats = update_value_with_mixed_batch(
+            value_net=value_net,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            transitions=mixed_steps,
+            gamma=float(ppo_cfg.get('gamma', 0.99)),
+            optimizer=value_opt,
+            device=device,
+        )
         metrics.append(
             {
                 'update': float(update_idx),
                 **stats,
+                **aux_stats,
                 'episode_return': float(sum(step.reward for step in real_steps)),
                 'buffer_real_size': float(len(replay.real_buffer)),
                 'buffer_model_size': float(len(replay.model_buffer)),
@@ -371,6 +385,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 'start_state_queue_mean': start_queue_mean,
                 'model_selection_strategy': 1.0 if model_selection_strategy in {'prioritized', 'priority_coverage'} else 0.0,
                 'decision_guidance_enabled': decision_guidance_used,
+                'model_augmentation_enabled': 1.0 if augmentation_enabled else 0.0,
             }
         )
 

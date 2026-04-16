@@ -53,10 +53,11 @@ def update_ppo(
     value_opt: torch.optim.Optimizer,
     device: torch.device,
 ) -> Dict[str, float]:
-    if not trajectory:
+    real_steps = [step for step in trajectory if step.source == 'real']
+    if not real_steps:
         return {'policy_loss': 0.0, 'value_loss': 0.0, 'entropy': 0.0}
-    old_log_probs = np.asarray([step.log_prob for step in trajectory], dtype=np.float32)
-    advantages, returns = compute_targets(trajectory, gamma=float(cfg['gamma']))
+    old_log_probs = np.asarray([step.log_prob for step in real_steps], dtype=np.float32)
+    advantages, returns = compute_targets(real_steps, gamma=float(cfg['gamma']))
 
     clip_ratio = float(cfg['clip_ratio'])
     entropy_coef = float(cfg['entropy_coef'])
@@ -64,7 +65,7 @@ def update_ppo(
     grad_clip = float(cfg['grad_clip'])
     epochs = int(cfg['epochs'])
     minibatch = int(cfg['minibatch_size'])
-    indices = np.arange(len(trajectory))
+    indices = np.arange(len(real_steps))
     last_stats = {'policy_loss': 0.0, 'value_loss': 0.0, 'entropy': 0.0}
 
     for _ in range(epochs):
@@ -77,7 +78,7 @@ def update_ppo(
             value_loss = 0.0
             entropy = 0.0
             for idx in batch_ids:
-                step = trajectory[int(idx)]
+                step = real_steps[int(idx)]
                 node_x = torch.tensor(step.state, dtype=torch.float32, device=device)
                 action_mask = torch.tensor(step.action_mask, dtype=torch.float32, device=device)
                 action = torch.tensor(step.action, dtype=torch.long, device=device)
@@ -110,3 +111,29 @@ def update_ppo(
                 'entropy': float(entropy.detach().cpu().item()),
             }
     return last_stats
+
+
+
+def update_value_with_mixed_batch(
+    value_net: GraphValueHead,
+    edge_index: torch.Tensor,
+    edge_attr: torch.Tensor | None,
+    transitions: List[TrajectoryStep],
+    gamma: float,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> Dict[str, float]:
+    if not transitions:
+        return {'aux_value_loss': 0.0, 'aux_batch_size': 0.0}
+    loss = 0.0
+    for step in transitions:
+        node_x = torch.tensor(step.state, dtype=torch.float32, device=device)
+        target = torch.tensor(float(step.reward) + float(gamma) * float(step.next_value) * (1.0 - float(step.done)), dtype=torch.float32, device=device)
+        pred = value_net(node_x, edge_index, edge_attr).squeeze(0)
+        loss = loss + F.mse_loss(pred, target)
+    loss = loss / float(max(len(transitions), 1))
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(value_net.parameters(), 1.0)
+    optimizer.step()
+    return {'aux_value_loss': float(loss.detach().cpu().item()), 'aux_batch_size': float(len(transitions))}
