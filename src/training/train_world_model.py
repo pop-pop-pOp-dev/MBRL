@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
+import math
 import torch
 from torch.utils.data import DataLoader
 
@@ -36,12 +37,38 @@ def build_ensemble(cfg: Dict[str, Any], state_dim: int, max_actions: int, edge_d
 
 def _scheduled_teacher_forcing(epoch_idx: int, total_epochs: int, cfg: Dict[str, Any]) -> float:
     dyn_cfg = cfg.get('dynamics', {})
+    schedule = str(dyn_cfg.get('rollout_schedule', 'linear'))
     base = float(dyn_cfg.get('teacher_forcing_ratio', 1.0))
     free_ratio = float(dyn_cfg.get('free_rollout_ratio', 0.5))
     if total_epochs <= 1:
         return max(0.0, min(1.0, base))
     progress = float(epoch_idx) / float(max(total_epochs - 1, 1))
-    return max(0.0, min(1.0, base * (1.0 - progress * free_ratio)))
+    if schedule == 'constant':
+        value = base
+    elif schedule == 'piecewise':
+        value = base if progress < 0.5 else max(0.0, base * (1.0 - free_ratio))
+    elif schedule == 'cosine':
+        value = base * (1.0 - free_ratio * 0.5 * (1.0 - math.cos(math.pi * progress)))
+    else:
+        value = base * (1.0 - progress * free_ratio)
+    return max(0.0, min(1.0, value))
+
+
+
+def _effective_rollout_horizon(epoch_idx: int, total_epochs: int, cfg: Dict[str, Any]) -> int:
+    dyn_cfg = cfg.get('dynamics', {})
+    target_horizon = int(dyn_cfg.get('train_horizon', dyn_cfg.get('horizon', 5)))
+    schedule = str(dyn_cfg.get('rollout_schedule', 'linear'))
+    if target_horizon <= 1 or total_epochs <= 1:
+        return target_horizon
+    progress = float(epoch_idx) / float(max(total_epochs - 1, 1))
+    if schedule == 'constant':
+        return target_horizon
+    if schedule == 'piecewise':
+        return 1 if progress < 0.5 else target_horizon
+    if schedule == 'cosine':
+        return max(1, int(round(1 + (target_horizon - 1) * 0.5 * (1.0 - math.cos(math.pi * progress)))))
+    return max(1, int(round(1 + (target_horizon - 1) * progress)))
 
 
 
@@ -53,21 +80,22 @@ def train_world_model(
     transitions: List[Transition],
     device: torch.device,
 ) -> Dict[str, float]:
-    horizon = int(cfg.get('dynamics', {}).get('train_horizon', cfg.get('dynamics', {}).get('horizon', 5)))
-    windows = build_multistep_windows(transitions, horizon=horizon)
+    max_horizon = int(cfg.get('dynamics', {}).get('train_horizon', cfg.get('dynamics', {}).get('horizon', 5)))
+    windows = build_multistep_windows(transitions, horizon=max_horizon)
     if not windows:
-        return {'world_model_loss': 0.0, 'one_step_loss': 0.0, 'multistep_loss': 0.0, 'prior_penalty': 0.0, 'rollout_horizon': float(horizon)}
+        return {'world_model_loss': 0.0, 'one_step_loss': 0.0, 'multistep_loss': 0.0, 'prior_penalty': 0.0, 'rollout_horizon': float(max_horizon), 'teacher_forcing_ratio': 1.0}
     loader = DataLoader(MultiStepTransitionDataset(windows), batch_size=int(cfg.get('training', {}).get('batch_size', 64)), shuffle=True)
     optimizers = [torch.optim.Adam(model.parameters(), lr=3e-4) for model in ensemble.models]
     lambda_phase = float(cfg.get('dynamics', {}).get('lambda_phase', 2.0))
     lambda_multistep = float(cfg.get('dynamics', {}).get('lambda_multistep', 0.5))
     prior_weight = float(cfg.get('dynamics', {}).get('prior_weight', 0.2))
     phase_slice = ensemble.models[0].observation_spec.latest_dynamic_slice
-    last_stats = {'world_model_loss': 0.0, 'one_step_loss': 0.0, 'multistep_loss': 0.0, 'prior_penalty': 0.0, 'rollout_horizon': float(horizon)}
+    last_stats = {'world_model_loss': 0.0, 'one_step_loss': 0.0, 'multistep_loss': 0.0, 'prior_penalty': 0.0, 'rollout_horizon': float(max_horizon), 'teacher_forcing_ratio': 1.0}
     ensemble.to(device)
     total_epochs = int(cfg.get('training', {}).get('world_model_epochs', 20))
     for epoch_idx in range(total_epochs):
         teacher_ratio = _scheduled_teacher_forcing(epoch_idx, total_epochs, cfg)
+        effective_horizon = _effective_rollout_horizon(epoch_idx, total_epochs, cfg)
         for batch in loader:
             states = batch['states'].to(device)
             actions = batch['actions'].to(device)
@@ -77,8 +105,9 @@ def train_world_model(
                 batch_multi = 0.0
                 batch_prior = 0.0
                 for seq_states, seq_actions in zip(states, actions):
-                    predictions = model.rollout_sequence(seq_states, seq_actions, edge_index, edge_attr, teacher_forcing_ratio=teacher_ratio)
-                    targets = [seq_states[idx + 1] for idx in range(seq_actions.size(0))]
+                    horizon = min(int(seq_actions.size(0)), int(effective_horizon))
+                    predictions = model.rollout_sequence(seq_states[: horizon + 1], seq_actions[:horizon], edge_index, edge_attr, teacher_forcing_ratio=teacher_ratio)
+                    targets = [seq_states[idx + 1] for idx in range(horizon)]
                     one = one_step_loss(predictions[0], targets[0], phase_slice=phase_slice, lambda_phase=lambda_phase)
                     multi = multi_step_loss(predictions, targets, lambda_multistep=lambda_multistep, phase_slice=phase_slice, lambda_phase=lambda_phase)
                     prior = 0.0
@@ -100,7 +129,8 @@ def train_world_model(
                     'one_step_loss': float((batch_one / scale).cpu().item()),
                     'multistep_loss': float((batch_multi / scale).cpu().item()),
                     'prior_penalty': float((batch_prior / scale).cpu().item()),
-                    'rollout_horizon': float(horizon),
+                    'rollout_horizon': float(effective_horizon),
+                    'teacher_forcing_ratio': float(teacher_ratio),
                 }
     return last_stats
 

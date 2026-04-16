@@ -1,0 +1,6 @@
+_base_: ../base.yaml
+experiment_name: prefix_mixing
+output_dir: ./outputs/prefix_mixing
+training:
+  model_selection_strategy: random
+  coverage_selection: false

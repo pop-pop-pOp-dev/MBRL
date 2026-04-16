@@ -23,6 +23,15 @@ class ReplayBuffer:
         batch_size = min(int(batch_size), len(self.buffer))
         return random.sample(list(self.buffer), batch_size)
 
+    def latest(self, batch_size: int) -> List[T]:
+        batch_size = min(int(batch_size), len(self.buffer))
+        if batch_size <= 0:
+            return []
+        return list(self.buffer)[-batch_size:]
+
+    def all(self) -> List[T]:
+        return list(self.buffer)
+
     def __len__(self) -> int:
         return len(self.buffer)
 
@@ -38,8 +47,37 @@ class SplitReplayBuffer:
     def add_model(self, item: T) -> None:
         self.model_buffer.add(item)
 
-    def sample_mixed(self, real_count: int, model_count: int) -> List[T]:
-        return self.real_buffer.sample(real_count) + self.model_buffer.sample(model_count)
+    def sample_real(self, batch_size: int, strategy: str = 'random') -> List[T]:
+        if strategy == 'latest':
+            return self.real_buffer.latest(batch_size)
+        return self.real_buffer.sample(batch_size)
+
+    def sample_model(self, batch_size: int, strategy: str = 'random') -> List[T]:
+        if strategy == 'latest':
+            return self.model_buffer.latest(batch_size)
+        return self.model_buffer.sample(batch_size)
+
+    def sample_mixed_by_ratio(
+        self,
+        total_count: int,
+        real_ratio: float,
+        model_ratio: float,
+        real_strategy: str = 'random',
+        model_strategy: str = 'random',
+    ) -> tuple[List[T], List[T]]:
+        total_count = max(int(total_count), 0)
+        ratio_sum = max(float(real_ratio) + float(model_ratio), 1e-6)
+        desired_real = int(total_count * float(real_ratio) / ratio_sum)
+        desired_model = total_count - desired_real
+        real_items = self.sample_real(desired_real, strategy=real_strategy)
+        model_items = self.sample_model(desired_model, strategy=model_strategy)
+        shortfall = total_count - len(real_items) - len(model_items)
+        if shortfall > 0:
+            if len(real_items) < desired_real:
+                real_items.extend(self.sample_real(shortfall, strategy=real_strategy))
+            else:
+                model_items.extend(self.sample_model(shortfall, strategy=model_strategy))
+        return real_items[: max(desired_real, len(real_items))], model_items[: max(desired_model, len(model_items))]
 
     def __len__(self) -> int:
         return len(self.real_buffer) + len(self.model_buffer)

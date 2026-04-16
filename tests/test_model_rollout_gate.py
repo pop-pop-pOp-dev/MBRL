@@ -29,5 +29,7 @@ def test_rollout_gate_stops_on_high_uncertainty():
         reward_fn=lambda s, n, a: (0.0, {}),
         uncertainty_threshold=-1.0,
         lambda_uncertainty=0.1,
+        uncertainty_mode='threshold_ranked',
+        pessimism_coef=0.1,
     )
     assert transitions == []

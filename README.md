@@ -1,6 +1,6 @@
 # CityFlow MBRL+ Signal Control
 
-A CityFlow-based traffic signal control project using uncertainty-aware traffic MBPO / Dyna-style MBRL rather than heavy planner-based control.
+A CityFlow-based traffic signal control project using a hardened uncertainty-aware traffic MBPO / Dyna-style MBRL stack rather than heavy planner-based control.
 
 ## Defaults
 
@@ -9,8 +9,8 @@ A CityFlow-based traffic signal control project using uncertainty-aware traffic 
 - Control: centralized training with per-intersection multi-discrete phase actions
 - Policy: `PPO`
 - World model: `GAT + action fusion + GRU` with multi-step consistent training
-- Uncertainty: ensemble variance gate
-- Positioning: uncertainty-aware traffic MBPO, not MPC or shooting-based planning
+- Uncertainty: ensemble variance gate plus ranked/pessimistic imagined sample selection
+- Positioning: hardened route-1 traffic MBPO, not MPC or shooting-based planning
 
 ## Layout
 
@@ -19,7 +19,7 @@ A CityFlow-based traffic signal control project using uncertainty-aware traffic 
 - `src/env/`: CityFlow env, observation, reward, and phase control
 - `src/models/`: encoder, policy/value heads, dynamics, uncertainty
 - `src/rl/`: multi-discrete PPO
-- `src/training/`: offline pretrain, world model, and MBRL training
+- `src/training/`: offline pretrain, world model, replay, sample selection, and MBRL training
 - `src/eval/`: evaluation, generalization, and robustness
 - `scripts/`: runnable entrypoints
 - `tests/`: unit tests
@@ -34,13 +34,13 @@ python3 scripts/train_mbrl.py --config configs/experiments/fuhua_mbrl_ppo.yaml
 python3 scripts/evaluate.py --config configs/experiments/fuhua_mbrl_ppo.yaml
 ```
 
-## Key upgrades
+## Route-1 hardening highlights
 
-- Unified synthetic and real reward structure
-- Multi-step consistent world model training
-- Ratio-controlled real/model mixing for PPO
-- Traffic prior penalties for physical feasibility
-- Broader offline coverage with heuristic and random perturbation mixture
+- Replay-based mixed sampling instead of prefix slicing
+- Prioritized and coverage-aware imagined sample selection
+- Config-driven model start-state strategy and rollout schedule
+- Threshold-ranked and pessimistic uncertainty usage for imagined data retention
+- Still route-1 MBPO/Dyna style, not planner-based control
 
 ## Recommended ablations
 
@@ -49,3 +49,6 @@ python3 scripts/evaluate.py --config configs/experiments/fuhua_mbrl_ppo.yaml
 - `configs/ablations/no_uncertainty.yaml`
 - `configs/ablations/one_step_world_model.yaml`
 - `configs/ablations/no_prior_constraints.yaml`
+- `configs/ablations/prefix_mixing.yaml`
+- `configs/ablations/no_priority_selection.yaml`
+- `configs/ablations/no_coverage_selection.yaml`

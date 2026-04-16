@@ -20,6 +20,8 @@ def rollout_model(
     reward_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], tuple[float, Dict[str, float]]],
     uncertainty_threshold: float,
     lambda_uncertainty: float,
+    uncertainty_mode: str = 'threshold_only',
+    pessimism_coef: float = 0.0,
 ) -> List[Dict[str, torch.Tensor | float | Dict[str, float]]]:
     transitions: List[Dict[str, torch.Tensor | float | Dict[str, float]]] = []
     history_states = [state]
@@ -33,14 +35,19 @@ def rollout_model(
         sigma = float(var_state.mean().item())
         if sigma > float(uncertainty_threshold):
             break
-        reward, reward_terms = reward_fn(current_state, mean_state, actions)
+        std_state = torch.sqrt(torch.clamp(var_state, min=1e-8))
+        pessimistic_state = mean_state - float(pessimism_coef) * std_state
+        rollout_state = pessimistic_state if uncertainty_mode in {'threshold_ranked', 'pessimistic_ranked'} else mean_state
+        reward, reward_terms = reward_fn(current_state, rollout_state, actions)
         reward = float(reward) - float(lambda_uncertainty) * sigma
-        next_mask = action_mask_fn(mean_state)
+        next_mask = action_mask_fn(rollout_state)
         transitions.append(
             {
                 'state': current_state,
                 'action': actions,
-                'next_state': mean_state,
+                'next_state': rollout_state,
+                'mean_state': mean_state,
+                'pessimistic_state': pessimistic_state,
                 'action_mask': current_mask,
                 'next_action_mask': next_mask,
                 'uncertainty': sigma,
@@ -48,7 +55,7 @@ def rollout_model(
                 'reward_terms': reward_terms,
             }
         )
-        current_state = mean_state
+        current_state = rollout_state
         current_mask = next_mask
-        history_states.append(mean_state)
+        history_states.append(rollout_state)
     return transitions

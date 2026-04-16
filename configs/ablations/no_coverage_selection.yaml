@@ -1,0 +1,5 @@
+_base_: ../base.yaml
+experiment_name: no_coverage_selection
+output_dir: ./outputs/no_coverage_selection
+training:
+  coverage_selection: false

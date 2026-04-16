@@ -49,6 +49,10 @@ dynamics:
   free_rollout_ratio: 0.5
   rollout_schedule: linear
   prior_weight: 0.2
+  uncertainty_mode: threshold_ranked
+  uncertainty_rank_metric: uncertainty
+  uncertainty_keep_topk: 128
+  pessimism_coef: 0.25
 
 ppo:
   lr: 3.0e-4
@@ -77,6 +81,17 @@ training:
   rollout_keep_ratio_log: true
   max_model_samples_per_update: 4096
   max_real_samples_per_update: 4096
+  model_selection_strategy: priority_coverage
+  priority_alpha: 1.0
+  priority_beta: 0.5
+  priority_metrics: [uncertainty, reward, queue_proxy]
+  coverage_selection: true
+  coverage_bins:
+    queue: 4
+    phase: 4
+    uncertainty: 4
+  coverage_min_fraction: 0.1
+  coverage_feature_set: [queue, phase, uncertainty]
   offline_policy_mix:
     fixed_time: 0.35
     max_pressure: 0.35

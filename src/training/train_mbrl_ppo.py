@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 import numpy as np
 import torch
@@ -16,7 +16,8 @@ from src.models.value_head import GraphValueHead
 from src.rl.ppo_multidiscrete import TrajectoryStep, update_ppo
 from src.training.offline_pretrain import behavior_clone_policy, collect_offline_transitions
 from src.training.replay_buffer import SplitReplayBuffer
-from src.training.train_world_model import build_ensemble, save_ensemble, train_world_model
+from src.training.sample_selection import select_model_samples
+from src.training.train_world_model import build_ensemble, train_world_model, save_ensemble
 from src.utils.seed import seed_everything
 
 
@@ -100,6 +101,57 @@ def _step_to_transition(step: TrajectoryStep) -> Transition:
 
 
 
+def _queue_mean_from_transition(transition: Transition, observation_spec) -> float:
+    metrics = observation_spec.metrics_from_state(transition.state)
+    return float(np.mean(metrics.queue))
+
+
+
+def _select_start_transitions(
+    replay: SplitReplayBuffer,
+    strategy: str,
+    model_start_count: int,
+    observation_spec,
+) -> List[Transition]:
+    strategy = str(strategy)
+    if strategy == 'recent_real_episode':
+        return replay.sample_real(model_start_count, strategy='latest')
+    all_real = replay.real_buffer.all()
+    if not all_real:
+        return []
+    if strategy == 'high_queue_states':
+        ordered = sorted(all_real, key=lambda item: _queue_mean_from_transition(item, observation_spec), reverse=True)
+        return ordered[:model_start_count]
+    if strategy == 'coverage_balanced':
+        ordered = sorted(all_real, key=lambda item: _queue_mean_from_transition(item, observation_spec))
+        if len(ordered) <= model_start_count:
+            return ordered
+        idxs = np.linspace(0, len(ordered) - 1, num=model_start_count, dtype=int)
+        return [ordered[int(idx)] for idx in idxs]
+    return replay.sample_real(model_start_count, strategy='random')
+
+
+
+def _select_model_transitions(
+    transitions: Sequence[Transition],
+    keep_count: int,
+    cfg: Dict[str, Any],
+) -> List[Transition]:
+    training_cfg = cfg.get('training', {})
+    metrics = list(training_cfg.get('priority_metrics', ['uncertainty', 'reward', 'queue_proxy']))
+    return select_model_samples(
+        transitions=transitions,
+        keep_count=keep_count,
+        alpha=float(training_cfg.get('priority_alpha', 1.0)),
+        beta=float(training_cfg.get('priority_beta', 1.0)),
+        metrics=metrics,
+        coverage_enabled=bool(training_cfg.get('coverage_selection', True)),
+        bins=dict(training_cfg.get('coverage_bins', {'queue': 4, 'phase': 4, 'uncertainty': 4})),
+        min_fraction=float(training_cfg.get('coverage_min_fraction', 0.1)),
+    )
+
+
+
 def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     seed_everything(int(cfg.get('seed', 42)))
     device = torch.device(str(cfg.get('device', 'cpu')))
@@ -113,6 +165,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     model_cfg = cfg.get('model', {})
     ppo_cfg = cfg.get('ppo', {})
     train_cfg = cfg.get('training', {})
+    dynamics_cfg = cfg.get('dynamics', {})
 
     policy = MultiDiscretePolicy(
         input_dim=input_dim,
@@ -160,16 +213,21 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     total_updates = int(ppo_cfg.get('total_updates', 10))
     metrics: List[Dict[str, float]] = []
     reward_fn = _make_synthetic_reward_fn(cfg, observation_spec)
+    model_selection_strategy = str(train_cfg.get('model_selection_strategy', 'prioritized'))
     for update_idx in range(total_updates):
         real_steps = _collect_real_trajectory(env, policy, value_net, device)
         for step in real_steps:
             replay.add_real(_step_to_transition(step))
 
-        synthetic_steps: List[TrajectoryStep] = []
+        generated_model_transitions: List[Transition] = []
         retention = 0.0
+        start_queue_mean = 0.0
+        start_strategy = str(train_cfg.get('model_start_state_strategy', 'real_buffer'))
         if ensemble is not None and float(train_cfg.get('model_ratio', 0.3)) > 0.0 and len(replay.real_buffer) > 0:
             model_start_count = max(1, int(train_cfg.get('model_start_state_count', 4)))
-            start_transitions = replay.real_buffer.sample(model_start_count)
+            start_transitions = _select_start_transitions(replay, strategy=start_strategy, model_start_count=model_start_count, observation_spec=observation_spec)
+            if start_transitions:
+                start_queue_mean = float(np.mean([_queue_mean_from_transition(item, observation_spec) for item in start_transitions]))
             retained = 0
             attempted = 0
             for start in start_transitions:
@@ -181,14 +239,16 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     edge_index=edge_index,
                     edge_attr=edge_attr,
                     action_mask=start_mask,
-                    horizon=int(cfg.get('dynamics', {}).get('horizon', 5)),
+                    horizon=int(dynamics_cfg.get('horizon', 5)),
                     policy_fn=lambda state, edge, edge_features, mask: policy.sample(state, edge, edge_features, mask, deterministic=False).actions,
                     action_mask_fn=lambda state: _build_action_mask_from_state(state, max_actions, observation_spec),
                     reward_fn=reward_fn,
-                    uncertainty_threshold=float(cfg.get('dynamics', {}).get('uncertainty_threshold', 0.25)),
-                    lambda_uncertainty=float(cfg.get('dynamics', {}).get('lambda_uncertainty', 0.1)),
+                    uncertainty_threshold=float(dynamics_cfg.get('uncertainty_threshold', 0.25)),
+                    lambda_uncertainty=float(dynamics_cfg.get('lambda_uncertainty', 0.1)),
+                    uncertainty_mode=str(dynamics_cfg.get('uncertainty_mode', 'threshold_only')),
+                    pessimism_coef=float(dynamics_cfg.get('pessimism_coef', 0.0)),
                 )
-                attempted += int(cfg.get('dynamics', {}).get('horizon', 5))
+                attempted += int(dynamics_cfg.get('horizon', 5))
                 retained += len(synth)
                 for item in synth:
                     state = item['state']
@@ -198,55 +258,83 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     next_action_mask_t = item['next_action_mask']
                     if not isinstance(state, torch.Tensor) or not isinstance(next_state, torch.Tensor) or not isinstance(action, torch.Tensor):
                         continue
-                    with torch.no_grad():
-                        log_prob, _ = policy.evaluate_actions(state, edge_index, edge_attr, action_mask_t, action)
-                        value = float(value_net(state, edge_index, edge_attr).item())
-                        next_value = float(value_net(next_state, edge_index, edge_attr).item())
-                    step = TrajectoryStep(
-                        state=state.detach().cpu().numpy(),
-                        action_mask=action_mask_t.detach().cpu().numpy(),
-                        action=action.detach().cpu().numpy(),
-                        reward=float(item['reward']),
-                        done=0.0,
-                        log_prob=float(log_prob.detach().cpu().item()),
-                        value=value,
-                        next_state=next_state.detach().cpu().numpy(),
-                        next_action_mask=next_action_mask_t.detach().cpu().numpy(),
-                        next_value=next_value,
-                        source='model',
-                        uncertainty=float(item['uncertainty']),
+                    generated_model_transitions.append(
+                        Transition(
+                            state=state.detach().cpu().numpy(),
+                            action=action.detach().cpu().numpy(),
+                            reward=float(item['reward']),
+                            next_state=next_state.detach().cpu().numpy(),
+                            done=0.0,
+                            action_mask=action_mask_t.detach().cpu().numpy(),
+                            next_action_mask=next_action_mask_t.detach().cpu().numpy(),
+                            uncertainty=float(item['uncertainty']),
+                            source='model',
+                        )
                     )
-                    synthetic_steps.append(step)
-                    replay.add_model(_step_to_transition(step))
             retention = float(retained) / float(max(attempted, 1))
+            keep_count = min(len(generated_model_transitions), int(train_cfg.get('max_model_samples_per_update', 4096)))
+            if model_selection_strategy in {'prioritized', 'priority_coverage'}:
+                selected_model_transitions = _select_model_transitions(generated_model_transitions, keep_count=keep_count, cfg=cfg)
+            else:
+                selected_model_transitions = generated_model_transitions[:keep_count]
+            for transition in selected_model_transitions:
+                replay.add_model(transition)
 
-        mixed_steps: List[TrajectoryStep] = []
         batch_size = int(ppo_cfg.get('rollout_steps', 256))
         real_ratio = float(train_cfg.get('real_ratio', 0.7))
         model_ratio = float(train_cfg.get('model_ratio', 0.3))
-        ratio_sum = max(real_ratio + model_ratio, 1e-6)
-        real_count = min(len(real_steps), int(batch_size * real_ratio / ratio_sum))
-        model_count = min(len(synthetic_steps), int(batch_size * model_ratio / ratio_sum))
-        if real_count == 0 and len(real_steps) > 0:
-            real_count = min(len(real_steps), batch_size)
-        if model_count == 0 and len(synthetic_steps) > 0 and float(train_cfg.get('model_ratio', 0.0)) > 0:
-            model_count = min(len(synthetic_steps), max(1, batch_size - real_count))
-        if real_count > 0:
-            mixed_steps.extend(real_steps[:real_count])
-        if model_count > 0:
-            mixed_steps.extend(synthetic_steps[:model_count])
+        sampled_real, sampled_model = replay.sample_mixed_by_ratio(
+            total_count=batch_size,
+            real_ratio=real_ratio,
+            model_ratio=model_ratio,
+            real_strategy='random',
+            model_strategy='random',
+        )
+        mixed_transitions = list(sampled_real) + list(sampled_model)
+        mixed_steps: List[TrajectoryStep] = []
+        for transition in mixed_transitions:
+            node_state = torch.tensor(transition.state, dtype=torch.float32, device=device)
+            next_node_state = torch.tensor(transition.next_state, dtype=torch.float32, device=device)
+            action_mask_t = torch.tensor(transition.action_mask, dtype=torch.float32, device=device)
+            action_t = torch.tensor(transition.action, dtype=torch.long, device=device)
+            with torch.no_grad():
+                log_prob, _ = policy.evaluate_actions(node_state, edge_index, edge_attr, action_mask_t, action_t)
+                value = float(value_net(node_state, edge_index, edge_attr).item())
+                next_value = 0.0 if float(transition.done) > 0.5 else float(value_net(next_node_state, edge_index, edge_attr).item())
+            mixed_steps.append(
+                TrajectoryStep(
+                    state=transition.state,
+                    action_mask=transition.action_mask,
+                    action=transition.action,
+                    reward=float(transition.reward),
+                    done=float(transition.done),
+                    log_prob=float(log_prob.detach().cpu().item()),
+                    value=value,
+                    next_state=transition.next_state,
+                    next_action_mask=transition.next_action_mask,
+                    next_value=next_value,
+                    source=transition.source,
+                    uncertainty=float(transition.uncertainty),
+                )
+            )
         stats = update_ppo(policy, value_net, edge_index, edge_attr, mixed_steps, ppo_cfg, policy_opt, value_opt, device=device)
         metrics.append(
             {
                 'update': float(update_idx),
                 **stats,
                 'episode_return': float(sum(step.reward for step in real_steps)),
-                'real_sample_count': float(real_count),
-                'model_sample_count': float(model_count),
+                'buffer_real_size': float(len(replay.real_buffer)),
+                'buffer_model_size': float(len(replay.model_buffer)),
+                'sampled_real_count': float(len(sampled_real)),
+                'sampled_model_count': float(len(sampled_model)),
                 'configured_real_ratio': real_ratio,
                 'configured_model_ratio': model_ratio,
-                'actual_model_ratio': float(model_count) / float(max(real_count + model_count, 1)),
+                'actual_model_ratio': float(len(sampled_model)) / float(max(len(sampled_real) + len(sampled_model), 1)),
                 'model_rollout_keep_ratio': retention,
+                'model_start_state_strategy': start_strategy,
+                'selected_start_state_count': float(train_cfg.get('model_start_state_count', 4)),
+                'start_state_queue_mean': start_queue_mean,
+                'model_selection_strategy': 1.0 if model_selection_strategy in {'prioritized', 'priority_coverage'} else 0.0,
             }
         )
 
