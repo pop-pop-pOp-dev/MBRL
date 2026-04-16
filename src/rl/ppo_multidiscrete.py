@@ -20,18 +20,25 @@ class TrajectoryStep:
     done: float
     log_prob: float
     value: float
+    next_state: np.ndarray
+    next_action_mask: np.ndarray
+    next_value: float
+    source: str = 'real'
+    uncertainty: float = 0.0
 
 
 
-def compute_gae(rewards: np.ndarray, values: np.ndarray, dones: np.ndarray, gamma: float, gae_lambda: float) -> tuple[np.ndarray, np.ndarray]:
-    advantages = np.zeros_like(rewards, dtype=np.float32)
-    gae = 0.0
-    for idx in reversed(range(len(rewards))):
-        delta = rewards[idx] + gamma * values[idx + 1] * (1.0 - dones[idx]) - values[idx]
-        gae = delta + gamma * gae_lambda * (1.0 - dones[idx]) * gae
-        advantages[idx] = gae
-    returns = advantages + values[:-1]
-    return advantages, returns
+def compute_targets(steps: List[TrajectoryStep], gamma: float) -> tuple[np.ndarray, np.ndarray]:
+    returns = []
+    advantages = []
+    for step in steps:
+        ret = float(step.reward) + float(gamma) * float(step.next_value) * (1.0 - float(step.done))
+        adv = ret - float(step.value)
+        returns.append(ret)
+        advantages.append(adv)
+    advantages = np.asarray(advantages, dtype=np.float32)
+    advantages = (advantages - advantages.mean()) / max(float(advantages.std()), 1e-6)
+    return advantages, np.asarray(returns, dtype=np.float32)
 
 
 
@@ -46,12 +53,10 @@ def update_ppo(
     value_opt: torch.optim.Optimizer,
     device: torch.device,
 ) -> Dict[str, float]:
-    rewards = np.asarray([step.reward for step in trajectory], dtype=np.float32)
-    dones = np.asarray([step.done for step in trajectory], dtype=np.float32)
+    if not trajectory:
+        return {'policy_loss': 0.0, 'value_loss': 0.0, 'entropy': 0.0}
     old_log_probs = np.asarray([step.log_prob for step in trajectory], dtype=np.float32)
-    values = np.asarray([step.value for step in trajectory] + [trajectory[-1].value], dtype=np.float32)
-    advantages, returns = compute_gae(rewards, values, dones, gamma=float(cfg['gamma']), gae_lambda=float(cfg['gae_lambda']))
-    advantages = (advantages - advantages.mean()) / max(float(advantages.std()), 1e-6)
+    advantages, returns = compute_targets(trajectory, gamma=float(cfg['gamma']))
 
     clip_ratio = float(cfg['clip_ratio'])
     entropy_coef = float(cfg['entropy_coef'])

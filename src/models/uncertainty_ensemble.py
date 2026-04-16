@@ -17,19 +17,19 @@ class DynamicsEnsemble(nn.Module):
 
     def forward(
         self,
-        state: torch.Tensor,
+        history_states: torch.Tensor,
+        history_actions: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attr: torch.Tensor | None,
-        actions: torch.Tensor,
     ) -> List[torch.Tensor]:
-        return [model(state, edge_index, edge_attr, actions) for model in self.models]
+        return [model.predict_next(history_states, history_actions, edge_index, edge_attr) for model in self.models]
 
     def predict_mean_var(
         self,
-        state: torch.Tensor,
+        history_states: torch.Tensor,
+        history_actions: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attr: torch.Tensor | None,
-        actions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        preds = torch.stack(self.forward(state, edge_index, edge_attr, actions), dim=0)
+        preds = torch.stack(self.forward(history_states, history_actions, edge_index, edge_attr), dim=0)
         return preds.mean(dim=0), preds.var(dim=0, unbiased=False)

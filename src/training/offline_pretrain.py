@@ -2,27 +2,51 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 from src.baselines.fixed_time import fixed_time_action
 from src.baselines.max_pressure import max_pressure_action
+from src.baselines.random_phase import random_phase_action
 from src.data.offline_dataset import Transition, TransitionDataset
 from src.models.policy_head import MultiDiscretePolicy
 
 
 
-def collect_offline_transitions(env, num_episodes: int) -> List[Transition]:
+def _select_behavior(obs: dict, episode: int, step: int, cfg: Dict) -> np.ndarray:
+    mix = cfg.get('training', {}).get('offline_policy_mix', {'fixed_time': 0.35, 'max_pressure': 0.35, 'random_phase': 0.30})
+    epsilon = float(cfg.get('training', {}).get('offline_epsilon', 0.1))
+    choices = [
+        ('fixed_time', float(mix.get('fixed_time', 0.35))),
+        ('max_pressure', float(mix.get('max_pressure', 0.35))),
+        ('random_phase', float(mix.get('random_phase', 0.30))),
+    ]
+    labels = [label for label, _ in choices]
+    probs = np.asarray([weight for _, weight in choices], dtype=np.float32)
+    probs = probs / max(probs.sum(), 1e-6)
+    label = str(np.random.choice(labels, p=probs))
+    if label == 'fixed_time':
+        action = fixed_time_action(obs['action_mask'], step=step)
+    elif label == 'max_pressure':
+        action = max_pressure_action(obs['node_features'], obs['action_mask'])
+    else:
+        action = random_phase_action(obs['action_mask'])
+    if np.random.rand() < epsilon:
+        action = random_phase_action(obs['action_mask'])
+    return action
+
+
+
+def collect_offline_transitions(env, num_episodes: int, cfg: Dict | None = None) -> List[Transition]:
+    cfg = cfg or {}
     transitions: List[Transition] = []
     for episode in range(int(num_episodes)):
         obs, _ = env.reset()
         done = False
         step = 0
         while not done:
-            if episode % 2 == 0:
-                action = fixed_time_action(obs['action_mask'], step=step)
-            else:
-                action = max_pressure_action(obs['node_features'], obs['action_mask'])
+            action = _select_behavior(obs, episode=episode, step=step, cfg=cfg)
             next_obs, reward, terminated, truncated, _info = env.step(action)
             transitions.append(
                 Transition(
@@ -33,6 +57,7 @@ def collect_offline_transitions(env, num_episodes: int) -> List[Transition]:
                     done=float(terminated or truncated),
                     action_mask=obs['action_mask'],
                     next_action_mask=next_obs['action_mask'],
+                    source='offline',
                 )
             )
             obs = next_obs

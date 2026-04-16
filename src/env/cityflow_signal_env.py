@@ -11,7 +11,7 @@ from src.data.cityflow_parser import RoadGraph, parse_cityflow_roadnet
 from src.data.scenario_registry import ensure_builtin_scenario
 from src.env.observation import ObservationBuilder
 from src.env.phase_controller import PhaseController
-from src.env.reward import compute_reward
+from src.env.reward import compute_reward_from_metrics
 
 try:
     import cityflow  # type: ignore
@@ -145,7 +145,7 @@ class CityFlowSignalEnv(gym.Env):
         self.phase_controller.reset()
         self.observation_builder.reset()
         obs = self._build_obs()
-        return obs, {'resolved_paths': self.resolved}
+        return obs, {'resolved_paths': self.resolved, 'observation_spec': self.observation_builder.spec}
 
     def step(self, action: np.ndarray):
         self._ensure_engine()
@@ -164,11 +164,12 @@ class CityFlowSignalEnv(gym.Env):
         obs = self._build_obs()
         metrics = self.observation_builder.last_metrics
         throughput = self._throughput_value()
-        reward, terms = compute_reward(metrics.queue, metrics.average_speed, switches, throughput, self.env_cfg.get('reward', {}))
+        reward, terms = compute_reward_from_metrics(metrics, switches, throughput, self.env_cfg.get('reward', {}))
         terminated = self.current_step >= self.episode_horizon
         info = dict(terms)
         info['current_time'] = float(self.engine.get_current_time())
         info['queue_mean'] = float(np.mean(metrics.queue))
         info['speed_mean'] = float(np.mean(metrics.average_speed))
         info['vehicle_count_mean'] = float(np.mean(metrics.vehicle_count))
+        info['observation_spec'] = self.observation_builder.spec
         return obs, float(reward), bool(terminated), False, info

@@ -15,6 +15,7 @@ def test_ppo_update_runs():
     value = GraphValueHead(input_dim=5, hidden_dim=8, edge_dim=2).to(device)
     edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long, device=device)
     edge_attr = torch.randn(2, 2, device=device)
+    next_state = np.random.randn(2, 5).astype(np.float32)
     trajectory = [
         TrajectoryStep(
             state=np.random.randn(2, 5).astype(np.float32),
@@ -24,6 +25,9 @@ def test_ppo_update_runs():
             done=0.0,
             log_prob=-0.5,
             value=0.1,
+            next_state=next_state,
+            next_action_mask=np.ones((2, 4), dtype=np.float32),
+            next_value=0.2,
         ),
         TrajectoryStep(
             state=np.random.randn(2, 5).astype(np.float32),
@@ -33,6 +37,9 @@ def test_ppo_update_runs():
             done=1.0,
             log_prob=-0.3,
             value=0.0,
+            next_state=np.random.randn(2, 5).astype(np.float32),
+            next_action_mask=np.ones((2, 4), dtype=np.float32),
+            next_value=0.0,
         ),
     ]
     policy_opt = torch.optim.Adam(policy.parameters(), lr=1e-3)

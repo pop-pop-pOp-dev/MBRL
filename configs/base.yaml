@@ -39,11 +39,16 @@ dynamics:
   hidden_dim: 128
   action_dim: 32
   horizon: 5
+  train_horizon: 5
   ensemble_size: 5
   lambda_multistep: 0.5
   lambda_phase: 2.0
   lambda_uncertainty: 0.1
   uncertainty_threshold: 0.25
+  teacher_forcing_ratio: 1.0
+  free_rollout_ratio: 0.5
+  rollout_schedule: linear
+  prior_weight: 0.2
 
 ppo:
   lr: 3.0e-4
@@ -67,3 +72,14 @@ training:
   world_model_epochs: 20
   bc_epochs: 5
   eval_every: 10
+  model_start_state_strategy: real_buffer
+  model_start_state_count: 4
+  rollout_keep_ratio_log: true
+  max_model_samples_per_update: 4096
+  max_real_samples_per_update: 4096
+  offline_policy_mix:
+    fixed_time: 0.35
+    max_pressure: 0.35
+    random_phase: 0.30
+  offline_epsilon: 0.1
+  flow_perturbation_levels: [0.0]

@@ -1,6 +1,6 @@
 # CityFlow MBRL+ Signal Control
 
-A CityFlow-based traffic signal control project using a weak world model, strong policy learning, and uncertainty-gated imagination.
+A CityFlow-based traffic signal control project using uncertainty-aware traffic MBPO / Dyna-style MBRL rather than heavy planner-based control.
 
 ## Defaults
 
@@ -8,8 +8,9 @@ A CityFlow-based traffic signal control project using a weak world model, strong
 - Benchmark: `RoadnetSZ Fuhua`
 - Control: centralized training with per-intersection multi-discrete phase actions
 - Policy: `PPO`
-- World model: `GAT + action fusion + GRU`
-- Uncertainty: `ensemble variance gate`
+- World model: `GAT + action fusion + GRU` with multi-step consistent training
+- Uncertainty: ensemble variance gate
+- Positioning: uncertainty-aware traffic MBPO, not MPC or shooting-based planning
 
 ## Layout
 
@@ -23,12 +24,6 @@ A CityFlow-based traffic signal control project using a weak world model, strong
 - `scripts/`: runnable entrypoints
 - `tests/`: unit tests
 
-## Install
-
-```bash
-pip install -r requirements.txt
-```
-
 ## Suggested workflow
 
 ```bash
@@ -39,7 +34,18 @@ python3 scripts/train_mbrl.py --config configs/experiments/fuhua_mbrl_ppo.yaml
 python3 scripts/evaluate.py --config configs/experiments/fuhua_mbrl_ppo.yaml
 ```
 
-## Notes
+## Key upgrades
 
-- Env scripts raise a clear error when `cityflow` is missing.
-- The project supports both built-in `RoadnetSZ Fuhua` assets and custom `roadnet.json + flow.json + config.json` inputs.
+- Unified synthetic and real reward structure
+- Multi-step consistent world model training
+- Ratio-controlled real/model mixing for PPO
+- Traffic prior penalties for physical feasibility
+- Broader offline coverage with heuristic and random perturbation mixture
+
+## Recommended ablations
+
+- `configs/ablations/real_only.yaml`
+- `configs/ablations/no_model.yaml`
+- `configs/ablations/no_uncertainty.yaml`
+- `configs/ablations/one_step_world_model.yaml`
+- `configs/ablations/no_prior_constraints.yaml`

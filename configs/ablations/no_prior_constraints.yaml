@@ -1,0 +1,5 @@
+_base_: ../base.yaml
+experiment_name: no_prior_constraints
+output_dir: ./outputs/no_prior_constraints
+dynamics:
+  prior_weight: 0.0

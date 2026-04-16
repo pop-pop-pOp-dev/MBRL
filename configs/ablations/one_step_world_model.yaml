@@ -1,0 +1,8 @@
+_base_: ../base.yaml
+experiment_name: one_step_world_model
+output_dir: ./outputs/one_step_world_model
+dynamics:
+  train_horizon: 1
+  lambda_multistep: 0.0
+  teacher_forcing_ratio: 1.0
+  free_rollout_ratio: 0.0

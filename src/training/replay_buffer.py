@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from collections import deque
-from typing import Deque, Iterable, List, Sequence, TypeVar
+from typing import Deque, Iterable, List, TypeVar
 
 T = TypeVar('T')
 
@@ -25,3 +25,21 @@ class ReplayBuffer:
 
     def __len__(self) -> int:
         return len(self.buffer)
+
+
+class SplitReplayBuffer:
+    def __init__(self, real_capacity: int, model_capacity: int):
+        self.real_buffer = ReplayBuffer(real_capacity)
+        self.model_buffer = ReplayBuffer(model_capacity)
+
+    def add_real(self, item: T) -> None:
+        self.real_buffer.add(item)
+
+    def add_model(self, item: T) -> None:
+        self.model_buffer.add(item)
+
+    def sample_mixed(self, real_count: int, model_count: int) -> List[T]:
+        return self.real_buffer.sample(real_count) + self.model_buffer.sample(model_count)
+
+    def __len__(self) -> int:
+        return len(self.real_buffer) + len(self.model_buffer)
