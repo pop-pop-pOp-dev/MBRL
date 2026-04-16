@@ -1,0 +1,6 @@
+_base_: ../base.yaml
+experiment_name: no_uncertainty
+output_dir: ./outputs/no_uncertainty
+dynamics:
+  lambda_uncertainty: 0.0
+  uncertainty_threshold: 999.0

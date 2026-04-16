@@ -1,0 +1,17 @@
+_base_: ../base.yaml
+experiment_name: fuhua_mbrl_ppo
+output_dir: ./outputs/fuhua_mbrl_ppo
+
+data:
+  scenario: roadnetsz_fuhua
+  roadnetsz_variant: fuhua_2490
+
+env:
+  control_interval: 5
+  episode_horizon: 720
+
+training:
+  collect_episodes: 30
+  world_model_epochs: 30
+  bc_epochs: 8
+  eval_every: 5

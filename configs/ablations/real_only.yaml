@@ -1,0 +1,5 @@
+_base_: ../base.yaml
+experiment_name: real_only_ppo
+output_dir: ./outputs/real_only_ppo
+training:
+  model_ratio: 0.0

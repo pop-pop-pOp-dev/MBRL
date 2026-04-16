@@ -1,0 +1,11 @@
+numpy
+pyyaml
+networkx
+pandas
+matplotlib
+gymnasium
+tensorboard
+torch
+torch-geometric
+pytest
+cityflow
