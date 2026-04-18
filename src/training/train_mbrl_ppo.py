@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -19,6 +20,7 @@ from src.training.offline_pretrain import behavior_clone_policy, collect_offline
 from src.training.replay_buffer import SplitReplayBuffer
 from src.training.sample_selection import select_model_samples
 from src.training.train_world_model import build_ensemble, train_world_model, save_ensemble
+from src.utils.device import resolve_device
 from src.utils.seed import seed_everything
 
 
@@ -174,9 +176,133 @@ def _select_model_transitions(
     )
 
 
+def _select_guidance_steps(
+    steps: Sequence[TrajectoryStep],
+    batch_size: int,
+    strategy: str,
+) -> List[TrajectoryStep]:
+    batch_size = min(max(int(batch_size), 0), len(steps))
+    if batch_size <= 0:
+        return []
+    if strategy == 'random':
+        indices = np.random.choice(len(steps), size=batch_size, replace=False)
+        return [steps[int(idx)] for idx in indices]
+    return list(steps[-batch_size:])
+
+
+def _update_policy_with_model_guidance(
+    policy: MultiDiscretePolicy,
+    value_net: GraphValueHead,
+    ensemble: DynamicsEnsemble | None,
+    edge_index: torch.Tensor,
+    edge_attr: torch.Tensor | None,
+    real_steps: Sequence[TrajectoryStep],
+    observation_spec,
+    reward_fn,
+    cfg: Dict[str, Any],
+    policy_opt: torch.optim.Optimizer,
+    device: torch.device,
+    max_actions: int,
+) -> Dict[str, float]:
+    guidance_cfg = dict(cfg.get('policy_guidance', {}))
+    if ensemble is None or not bool(guidance_cfg.get('enabled', False)):
+        return {
+            'guidance_policy_loss': 0.0,
+            'guidance_batch_size': 0.0,
+            'guidance_mean_uncertainty': 0.0,
+            'guidance_mean_gap': 0.0,
+        }
+    candidate_steps = _select_guidance_steps(
+        real_steps,
+        batch_size=int(guidance_cfg.get('batch_size', 8)),
+        strategy=str(guidance_cfg.get('state_strategy', 'latest')),
+    )
+    if not candidate_steps:
+        return {
+            'guidance_policy_loss': 0.0,
+            'guidance_batch_size': 0.0,
+            'guidance_mean_uncertainty': 0.0,
+            'guidance_mean_gap': 0.0,
+        }
+
+    planner_cfg = {
+        'mode': str(guidance_cfg.get('mode', 'first_action_rerank')),
+        'candidate_count': int(guidance_cfg.get('candidate_count', 4)),
+        'plan_count': int(guidance_cfg.get('plan_count', int(guidance_cfg.get('candidate_count', 4)))),
+        'include_greedy': bool(guidance_cfg.get('include_greedy', True)),
+        'horizon': int(guidance_cfg.get('horizon', 2)),
+        'discount': float(guidance_cfg.get('discount', cfg.get('ppo', {}).get('gamma', 0.99))),
+        'uncertainty_coef': float(guidance_cfg.get('uncertainty_coef', cfg.get('dynamics', {}).get('lambda_uncertainty', 0.0))),
+        'pessimism_coef': float(guidance_cfg.get('pessimism_coef', cfg.get('dynamics', {}).get('pessimism_coef', 0.0))),
+        'future_action_mode': str(guidance_cfg.get('future_action_mode', 'greedy')),
+    }
+    max_uncertainty = float(guidance_cfg.get('max_uncertainty', cfg.get('dynamics', {}).get('uncertainty_threshold', 1.0)))
+    min_score_gap = float(guidance_cfg.get('min_score_gap', 0.0))
+    coef = float(guidance_cfg.get('coef', 0.1))
+    grad_clip = float(cfg.get('ppo', {}).get('grad_clip', 1.0))
+
+    selected_states: List[np.ndarray] = []
+    selected_masks: List[np.ndarray] = []
+    selected_actions: List[np.ndarray] = []
+    uncertainties: List[float] = []
+    gaps: List[float] = []
+
+    for step in candidate_steps:
+        node_x = torch.tensor(step.state, dtype=torch.float32, device=device)
+        action_mask = torch.tensor(step.action_mask, dtype=torch.float32, device=device)
+        selection = select_action_with_world_model(
+            policy=policy,
+            value_net=value_net,
+            ensemble=ensemble,
+            node_x=node_x,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            action_mask=action_mask,
+            observation_spec=observation_spec,
+            reward_fn=reward_fn,
+            action_mask_fn=lambda state: _build_action_mask_from_state(state, max_actions, observation_spec),
+            cfg=planner_cfg,
+        )
+        if float(selection.selected_uncertainty) > max_uncertainty:
+            continue
+        if float(selection.score_gap) < min_score_gap:
+            continue
+        selected_states.append(np.asarray(step.state, dtype=np.float32))
+        selected_masks.append(np.asarray(step.action_mask, dtype=np.float32))
+        selected_actions.append(selection.action.detach().cpu().numpy().astype(np.int64, copy=False))
+        uncertainties.append(float(selection.selected_uncertainty))
+        gaps.append(float(selection.score_gap))
+
+    if not selected_states:
+        return {
+            'guidance_policy_loss': 0.0,
+            'guidance_batch_size': 0.0,
+            'guidance_mean_uncertainty': 0.0,
+            'guidance_mean_gap': 0.0,
+        }
+
+    state_batch = torch.tensor(np.stack(selected_states), dtype=torch.float32, device=device)
+    mask_batch = torch.tensor(np.stack(selected_masks), dtype=torch.float32, device=device)
+    action_batch = torch.tensor(np.stack(selected_actions), dtype=torch.long, device=device)
+    log_prob, _entropy = policy.evaluate_actions(state_batch, edge_index, edge_attr, mask_batch, action_batch)
+    action_count = max(int(action_batch.shape[-1]), 1)
+    guidance_loss = -log_prob / float(len(selected_states) * action_count)
+    total_loss = float(coef) * guidance_loss
+    policy_opt.zero_grad(set_to_none=True)
+    total_loss.backward()
+    torch.nn.utils.clip_grad_norm_(policy.parameters(), grad_clip)
+    policy_opt.step()
+    return {
+        'guidance_policy_loss': float(total_loss.detach().cpu().item()),
+        'guidance_batch_size': float(len(selected_states)),
+        'guidance_mean_uncertainty': float(np.mean(uncertainties)) if uncertainties else 0.0,
+        'guidance_mean_gap': float(np.mean(gaps)) if gaps else 0.0,
+    }
+
+
 def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     seed_everything(int(cfg.get('seed', 42)))
-    device = torch.device(str(cfg.get('device', 'cpu')))
+    device = resolve_device(cfg)
     env = CityFlowSignalEnv(cfg)
     obs, info = env.reset()
     observation_spec = info['observation_spec']
@@ -225,6 +351,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
         ensemble = build_ensemble(cfg, state_dim=input_dim, max_actions=max_actions, edge_dim=edge_dim, observation_spec=observation_spec)
         train_world_model(cfg, ensemble, edge_index, edge_attr, offline_transitions, device=device)
         behavior_clone_policy(
+            cfg,
             policy,
             edge_index,
             edge_attr,
@@ -240,7 +367,14 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     model_selection_strategy = str(train_cfg.get('model_selection_strategy', 'prioritized'))
     decision_guidance_used = 0.0
     augmentation_enabled = bool(model_aug_cfg.get('enabled', True))
+    start_time = datetime.now()
+    print(
+        f"[train] start time={start_time.isoformat()} total_updates={total_updates} "
+        f"augmentation_enabled={augmentation_enabled} decision_enabled={bool(decision_cfg.get('enabled', False))}",
+        flush=True,
+    )
     for update_idx in range(total_updates):
+        update_begin = datetime.now()
         real_steps = _collect_real_trajectory(
             env,
             policy,
@@ -320,6 +454,21 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
         # Keep PPO policy updates on-policy: only the latest real rollout carries old log-probs from the behavior policy.
         stats = update_ppo(policy, value_net, edge_index, edge_attr, real_steps, ppo_cfg, policy_opt, value_opt, device=device)
 
+        guidance_stats = _update_policy_with_model_guidance(
+            policy=policy,
+            value_net=value_net,
+            ensemble=ensemble,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            real_steps=real_steps,
+            observation_spec=observation_spec,
+            reward_fn=reward_fn,
+            cfg=cfg,
+            policy_opt=policy_opt,
+            device=device,
+            max_actions=max_actions,
+        )
+
         batch_size = int(ppo_cfg.get('rollout_steps', 256))
         real_ratio = float(train_cfg.get('real_ratio', 0.7))
         model_ratio = float(train_cfg.get('model_ratio', 0.3)) if augmentation_enabled else 0.0
@@ -370,6 +519,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
             {
                 'update': float(update_idx),
                 **stats,
+                **guidance_stats,
                 **aux_stats,
                 'episode_return': float(sum(step.reward for step in real_steps)),
                 'buffer_real_size': float(len(replay.real_buffer)),
@@ -388,15 +538,37 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 'model_augmentation_enabled': 1.0 if augmentation_enabled else 0.0,
             }
         )
+        latest = metrics[-1]
+        print(
+            "[train] "
+            f"update={update_idx + 1}/{total_updates} "
+            f"return={latest['episode_return']:.4f} "
+            f"policy_loss={latest.get('policy_loss', 0.0):.6f} "
+            f"guidance_loss={latest.get('guidance_policy_loss', 0.0):.6f} "
+            f"value_loss={latest.get('value_loss', 0.0):.6f} "
+            f"aux_value_loss={latest.get('aux_value_loss', 0.0):.6f} "
+            f"real_buf={int(latest['buffer_real_size'])} "
+            f"model_buf={int(latest['buffer_model_size'])} "
+            f"sampled_real={int(latest['sampled_real_count'])} "
+            f"sampled_model={int(latest['sampled_model_count'])} "
+            f"model_keep={latest['model_rollout_keep_ratio']:.4f} "
+            f"elapsed_sec={(datetime.now() - update_begin).total_seconds():.2f}",
+            flush=True,
+        )
 
         if ensemble is not None and (update_idx + 1) % max(int(train_cfg.get('eval_every', 10)), 1) == 0:
             refresh_data = collect_offline_transitions(env, num_episodes=2, cfg=cfg)
             offline_transitions.extend(refresh_data)
             train_world_model(cfg, ensemble, edge_index, edge_attr, offline_transitions, device=device)
+            cleared_model_count = len(replay.model_buffer)
+            replay.clear_model()
+            print(f"[train] world_model_refresh cleared_model_buffer={cleared_model_count}", flush=True)
 
     output_dir = Path(cfg.get('output_dir', './outputs'))
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save({'policy': policy.state_dict(), 'value': value_net.state_dict()}, output_dir / 'model_last.pt')
     if ensemble is not None:
         save_ensemble(ensemble, output_dir / 'dynamics_ensemble.pt')
+    total_elapsed = (datetime.now() - start_time).total_seconds()
+    print(f"[train] finished output_dir={output_dir} elapsed_sec={total_elapsed:.2f}", flush=True)
     return {'metrics': metrics, 'output_dir': str(output_dir)}

@@ -1,0 +1,13 @@
+_base_: ./fuhua_low_risk_conservative.yaml
+experiment_name: fuhua_low_risk_planning
+output_dir: ./outputs/fuhua_low_risk_planning
+
+decision:
+  enabled: true
+  eval_enabled: true
+  candidate_count: 3
+  plan_count: 3
+  horizon: 2
+  discount: 0.99
+  uncertainty_coef: 0.1
+  pessimism_coef: 0.0

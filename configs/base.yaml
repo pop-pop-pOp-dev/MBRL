@@ -1,6 +1,6 @@
 experiment_name: base
 seed: 42
-device: cpu
+device: cuda:0
 output_dir: ./outputs/base
 
 data:
@@ -70,6 +70,14 @@ ppo:
 
 training:
   batch_size: 64
+  world_model_batch_size: 256
+  world_model_num_workers: 4
+  world_model_prefetch_factor: 4
+  world_model_pin_memory: true
+  bc_batch_size: 256
+  bc_num_workers: 4
+  bc_prefetch_factor: 4
+  bc_pin_memory: true
   real_ratio: 0.7
   model_ratio: 0.3
   collect_episodes: 20
@@ -103,6 +111,23 @@ model_augmentation:
   enabled: true
   real_strategy: random
   model_strategy: random
+
+policy_guidance:
+  enabled: false
+  batch_size: 8
+  state_strategy: latest
+  coef: 0.1
+  min_score_gap: 0.0
+  max_uncertainty: 0.15
+  mode: first_action_rerank
+  candidate_count: 4
+  plan_count: 4
+  include_greedy: true
+  horizon: 2
+  discount: 0.99
+  uncertainty_coef: 0.1
+  pessimism_coef: 0.25
+  future_action_mode: greedy
 
 decision:
   enabled: true

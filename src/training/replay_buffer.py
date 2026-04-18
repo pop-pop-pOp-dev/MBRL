@@ -47,6 +47,9 @@ class SplitReplayBuffer:
     def add_model(self, item: T) -> None:
         self.model_buffer.add(item)
 
+    def clear_model(self) -> None:
+        self.model_buffer.buffer.clear()
+
     def sample_real(self, batch_size: int, strategy: str = 'random') -> List[T]:
         if strategy == 'latest':
             return self.real_buffer.latest(batch_size)

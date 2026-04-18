@@ -199,6 +199,37 @@ python3 scripts/train_mbrl.py --config configs/experiments/fuhua_mbrl_ppo.yaml
 python3 scripts/evaluate.py --config configs/experiments/fuhua_mbrl_ppo.yaml
 ```
 
+## Low-Risk Start
+
+For the most stable rollout path, use a staged experiment stack instead of enabling every world-model feature at once:
+
+- `configs/experiments/fuhua_low_risk_real_only.yaml`
+  - PPO only
+  - decision-time guidance off
+  - model augmentation off
+- `configs/experiments/fuhua_low_risk_conservative.yaml`
+  - short imagined horizon
+  - strict uncertainty gate
+  - small `model_ratio`
+  - training-time augmentation only
+- `configs/experiments/fuhua_low_risk_planning.yaml`
+  - starts from the conservative setup
+  - turns on short-horizon decision-time sequence shooting
+
+Recommended execution order:
+
+```bash
+python3 scripts/train_real_only.py --config configs/experiments/fuhua_low_risk_real_only.yaml
+python3 scripts/train_mbrl.py --config configs/experiments/fuhua_low_risk_conservative.yaml
+python3 scripts/train_mbrl.py --config configs/experiments/fuhua_low_risk_planning.yaml
+```
+
+This ordering keeps the experimental story interpretable:
+
+- first verify PPO remains stable
+- then verify conservative imagined data helps
+- finally test whether decision-time guidance adds extra gain
+
 ## Route-1 Hardening Highlights
 
 - Replay-based mixed sampling instead of prefix slicing

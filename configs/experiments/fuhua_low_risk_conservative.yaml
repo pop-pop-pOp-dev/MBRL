@@ -1,0 +1,48 @@
+_base_: ./fuhua_mbrl_ppo.yaml
+experiment_name: fuhua_low_risk_conservative
+output_dir: ./outputs/fuhua_low_risk_conservative
+
+dynamics:
+  horizon: 2
+  train_horizon: 3
+  lambda_uncertainty: 0.15
+  uncertainty_threshold: 0.12
+  uncertainty_mode: threshold_only
+  uncertainty_keep_topk: 64
+  pessimism_coef: 0.0
+
+training:
+  real_ratio: 0.9
+  model_ratio: 0.1
+  world_model_epochs: 10
+  eval_every: 3
+  model_start_state_strategy: real_buffer
+  model_start_state_count: 2
+  model_selection_strategy: prioritized
+  coverage_selection: false
+  max_model_samples_per_update: 512
+
+model_augmentation:
+  enabled: true
+  real_strategy: latest
+  model_strategy: random
+
+policy_guidance:
+  enabled: true
+  batch_size: 8
+  state_strategy: latest
+  coef: 0.15
+  min_score_gap: 0.0
+  max_uncertainty: 0.12
+  mode: first_action_rerank
+  candidate_count: 4
+  plan_count: 4
+  include_greedy: true
+  horizon: 2
+  uncertainty_coef: 0.15
+  pessimism_coef: 0.0
+  future_action_mode: greedy
+
+decision:
+  enabled: false
+  eval_enabled: false

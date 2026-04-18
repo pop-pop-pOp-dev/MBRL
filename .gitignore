@@ -4,3 +4,8 @@ __pycache__/
 outputs/
 *.pt
 .DS_Store
+.venv/
+logs/
+tmp_repo_root_config.json
+data/RoadnetSZ/tmp_*.json
+data/RoadnetSZ/generated_engine_config.json

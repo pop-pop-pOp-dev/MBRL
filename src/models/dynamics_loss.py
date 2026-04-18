@@ -11,7 +11,7 @@ from src.env.observation import ObservationSpec
 def one_step_loss(pred: torch.Tensor, target: torch.Tensor, phase_slice: slice | None = None, lambda_phase: float = 1.0) -> torch.Tensor:
     weights = torch.ones_like(target)
     if phase_slice is not None:
-        weights[:, phase_slice] = float(lambda_phase)
+        weights[..., phase_slice] = float(lambda_phase)
     return ((pred - target) ** 2 * weights).mean()
 
 
@@ -39,13 +39,13 @@ def prior_penalty(
 ) -> torch.Tensor:
     latest = spec.latest_dynamic(pred_state)
     prev_latest = spec.latest_dynamic(prev_state)
-    queue = latest[:, 0]
-    vehicle_count = latest[:, 1]
-    speed = latest[:, 2]
-    phase = latest[:, 3]
-    remaining = latest[:, 4]
-    prev_phase = prev_latest[:, 3]
-    prev_remaining = prev_latest[:, 4]
+    queue = latest[..., 0]
+    vehicle_count = latest[..., 1]
+    speed = latest[..., 2]
+    phase = latest[..., 3]
+    remaining = latest[..., 4]
+    prev_phase = prev_latest[..., 3]
+    prev_remaining = prev_latest[..., 4]
     hold_mask = (actions == 0).float()
     non_negative = torch.relu(-queue).mean() + torch.relu(-vehicle_count).mean() + torch.relu(-remaining).mean()
     bounded = torch.relu(-speed).mean() + torch.relu(speed - 1.0).mean() + torch.relu(-phase).mean() + torch.relu(phase - 1.0).mean()

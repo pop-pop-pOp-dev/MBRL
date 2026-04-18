@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from datetime import datetime
 from typing import Dict, List
 
 import numpy as np
@@ -42,6 +44,7 @@ def collect_offline_transitions(env, num_episodes: int, cfg: Dict | None = None)
     cfg = cfg or {}
     transitions: List[Transition] = []
     for episode in range(int(num_episodes)):
+        print(f"[offline] Collecting episode {episode+1}/{num_episodes}...", flush=True)
         obs, _ = env.reset()
         done = False
         step = 0
@@ -68,6 +71,7 @@ def collect_offline_transitions(env, num_episodes: int, cfg: Dict | None = None)
 
 
 def behavior_clone_policy(
+    cfg: Dict | None,
     policy: MultiDiscretePolicy,
     edge_index: torch.Tensor,
     edge_attr: torch.Tensor | None,
@@ -78,22 +82,60 @@ def behavior_clone_policy(
 ) -> Dict[str, float]:
     if not transitions:
         return {'bc_loss': 0.0}
+    cfg = cfg or {}
+    train_cfg = cfg.get('training', {})
+    bc_batch_size = int(train_cfg.get('bc_batch_size', max(int(batch_size), 256)))
+    num_workers = int(train_cfg.get('bc_num_workers', min(8, os.cpu_count() or 1)))
+    num_workers = max(0, num_workers)
+    prefetch_factor = int(train_cfg.get('bc_prefetch_factor', 4))
+    pin_memory = bool(train_cfg.get('bc_pin_memory', device.type == 'cuda'))
     optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
-    loader = DataLoader(TransitionDataset(transitions), batch_size=batch_size, shuffle=True)
+    loader_kwargs = {
+        'batch_size': bc_batch_size,
+        'shuffle': True,
+        'num_workers': num_workers,
+        'pin_memory': pin_memory,
+        'persistent_workers': num_workers > 0,
+    }
+    if num_workers > 0:
+        loader_kwargs['prefetch_factor'] = max(2, prefetch_factor)
+    loader = DataLoader(TransitionDataset(transitions), **loader_kwargs)
     last_loss = 0.0
     policy.train()
-    for _ in range(int(epochs)):
+    print(
+        f"[bc] start time={datetime.now().isoformat()} samples={len(transitions)} "
+        f"batch_size={bc_batch_size} num_workers={num_workers} epochs={int(epochs)}",
+        flush=True,
+    )
+    start_time = datetime.now()
+    for epoch_idx in range(int(epochs)):
+        epoch_start = datetime.now()
+        epoch_loss = 0.0
+        epoch_batches = 0
         for batch in loader:
-            loss = 0.0
-            for state, action_mask, action in zip(batch['state'], batch['action_mask'], batch['action']):
-                state = state.to(device)
-                action_mask = action_mask.to(device)
-                action = action.to(device)
-                log_prob, _ = policy.evaluate_actions(state, edge_index, edge_attr, action_mask, action)
-                loss = loss - log_prob
-            loss = loss / float(max(len(batch['state']), 1))
+            state = batch['state'].to(device, non_blocking=pin_memory)
+            action_mask = batch['action_mask'].to(device, non_blocking=pin_memory)
+            action = batch['action'].to(device, non_blocking=pin_memory)
+            log_prob, _ = policy.evaluate_actions(state, edge_index, edge_attr, action_mask, action)
+            loss = -log_prob / float(max(state.size(0), 1))
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             last_loss = float(loss.detach().cpu().item())
+            epoch_loss += last_loss
+            epoch_batches += 1
+        epoch_elapsed = (datetime.now() - epoch_start).total_seconds()
+        total_elapsed = (datetime.now() - start_time).total_seconds()
+        remaining_epochs = max(int(epochs) - (epoch_idx + 1), 0)
+        eta_seconds = remaining_epochs * epoch_elapsed
+        print(
+            f"[bc] epoch={epoch_idx + 1}/{int(epochs)} batches={epoch_batches} "
+            f"loss={epoch_loss / float(max(epoch_batches, 1)):.6f} "
+            f"elapsed_sec={epoch_elapsed:.2f} total_elapsed_sec={total_elapsed:.2f} eta_sec={eta_seconds:.2f}",
+            flush=True,
+        )
+    print(
+        f"[bc] finished time={datetime.now().isoformat()} elapsed_sec={(datetime.now() - start_time).total_seconds():.2f}",
+        flush=True,
+    )
     return {'bc_loss': last_loss}

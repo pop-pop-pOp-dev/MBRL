@@ -58,12 +58,14 @@ class ObservationSpec:
     def compose_next_state(self, previous_state: np.ndarray | torch.Tensor, next_dynamic: np.ndarray | torch.Tensor):
         stacked_dynamic, static_features = self.split_state(previous_state)
         if isinstance(previous_state, torch.Tensor):
-            history = stacked_dynamic.view(previous_state.shape[0], self.stack_k, self.dynamic_dim)
-            shifted = torch.cat([history[:, 1:, :], next_dynamic.unsqueeze(1)], dim=1)
-            return torch.cat([shifted.reshape(previous_state.shape[0], -1), static_features], dim=-1)
-        history = stacked_dynamic.reshape(previous_state.shape[0], self.stack_k, self.dynamic_dim)
-        shifted = np.concatenate([history[:, 1:, :], next_dynamic[:, None, :]], axis=1)
-        return np.concatenate([shifted.reshape(previous_state.shape[0], -1), static_features], axis=-1)
+            leading_shape = previous_state.shape[:-1]
+            history = stacked_dynamic.reshape(*leading_shape, self.stack_k, self.dynamic_dim)
+            shifted = torch.cat([history[..., 1:, :], next_dynamic.unsqueeze(-2)], dim=-2)
+            return torch.cat([shifted.reshape(*leading_shape, -1), static_features], dim=-1)
+        leading_shape = previous_state.shape[:-1]
+        history = stacked_dynamic.reshape(*leading_shape, self.stack_k, self.dynamic_dim)
+        shifted = np.concatenate([history[..., 1:, :], np.expand_dims(next_dynamic, axis=-2)], axis=-2)
+        return np.concatenate([shifted.reshape(*leading_shape, -1), static_features], axis=-1)
 
     def metrics_from_state(self, state: np.ndarray | torch.Tensor) -> IntersectionMetrics:
         latest = self.latest_dynamic(state)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -67,16 +68,22 @@ class CityFlowSignalEnv(gym.Env):
                 'flow_path': str(self.data_cfg['custom_flow_path']),
                 'config_path': str(self.data_cfg.get('custom_engine_config_path') or ''),
             }
-        if not resolved.get('config_path'):
+        config_path = str(resolved.get('config_path') or '')
+        if not config_path or not Path(config_path).exists():
             resolved['config_path'] = self._write_engine_config(resolved['roadnet_path'], resolved['flow_path'])
         return resolved
 
     def _write_engine_config(self, roadnet_path: str, flow_path: str) -> str:
         base_dir = Path(roadnet_path).resolve().parent
+        relative_dir = os.path.relpath(str(base_dir), start=str(Path.cwd()))
+        if relative_dir == '.':
+            relative_dir = './'
+        elif not relative_dir.endswith('/'):
+            relative_dir = f'{relative_dir}/'
         payload = {
             'interval': 1.0,
             'seed': int(self.cfg.get('seed', 42)),
-            'dir': str(base_dir),
+            'dir': relative_dir,
             'roadnetFile': Path(roadnet_path).name,
             'flowFile': Path(flow_path).name,
             'rlTrafficLight': True,

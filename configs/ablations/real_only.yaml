@@ -2,4 +2,10 @@ _base_: ../base.yaml
 experiment_name: real_only_ppo
 output_dir: ./outputs/real_only_ppo
 training:
+  real_ratio: 1.0
   model_ratio: 0.0
+model_augmentation:
+  enabled: false
+decision:
+  enabled: false
+  eval_enabled: false

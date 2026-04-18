@@ -41,6 +41,31 @@ class GraphDynamicsModel(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, observation_spec.dynamic_dim),
         )
+        self._edge_cache: dict[tuple[int, torch.device], tuple[torch.Tensor, torch.Tensor | None]] = {}
+
+    def _batched_graph_inputs(
+        self,
+        edge_index: torch.Tensor,
+        edge_attr: torch.Tensor | None,
+        num_nodes: int,
+        batch_size: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if batch_size <= 1:
+            return edge_index, edge_attr
+        cache_key = (batch_size, device)
+        cached = self._edge_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        num_edges = edge_index.size(1)
+        offsets = torch.arange(batch_size, device=device, dtype=edge_index.dtype).view(batch_size, 1, 1) * num_nodes
+        expanded_edge_index = edge_index.unsqueeze(0) + offsets
+        expanded_edge_index = expanded_edge_index.permute(1, 0, 2).reshape(2, batch_size * num_edges)
+        expanded_edge_attr = None
+        if edge_attr is not None:
+            expanded_edge_attr = edge_attr.repeat(batch_size, 1)
+        self._edge_cache[cache_key] = (expanded_edge_index, expanded_edge_attr)
+        return expanded_edge_index, expanded_edge_attr
 
     def _encode_history(
         self,
@@ -50,10 +75,32 @@ class GraphDynamicsModel(nn.Module):
         edge_attr: torch.Tensor | None,
     ) -> torch.Tensor:
         step_embeddings: List[torch.Tensor] = []
+        batched = history_states.dim() == 4
+        if batched:
+            _, batch_size, num_nodes, _ = history_states.shape
+            expanded_edge_index, expanded_edge_attr = self._batched_graph_inputs(
+                edge_index=edge_index,
+                edge_attr=edge_attr,
+                num_nodes=num_nodes,
+                batch_size=batch_size,
+                device=history_states.device,
+            )
+            batch_index = torch.arange(batch_size, device=history_states.device).repeat_interleave(num_nodes)
         for step_idx in range(history_states.size(0)):
-            node_emb, _ = self.encoder(history_states[step_idx], edge_index, edge_attr=edge_attr)
-            action_emb = self.action_fusion(history_actions[step_idx])
+            if batched:
+                step_state = history_states[step_idx].reshape(batch_size * num_nodes, -1)
+                node_emb, _ = self.encoder(step_state, expanded_edge_index, edge_attr=expanded_edge_attr, batch=batch_index)
+                node_emb = node_emb.reshape(batch_size, num_nodes, -1)
+                action_emb = self.action_fusion(history_actions[step_idx])
+            else:
+                node_emb, _ = self.encoder(history_states[step_idx], edge_index, edge_attr=edge_attr)
+                action_emb = self.action_fusion(history_actions[step_idx])
             step_embeddings.append(torch.cat([node_emb, action_emb], dim=-1))
+        if batched:
+            sequence = torch.stack(step_embeddings, dim=2)
+            sequence = sequence.reshape(batch_size * num_nodes, history_states.size(0), -1)
+            temporal_out = self.temporal(sequence)
+            return temporal_out.reshape(batch_size, num_nodes, -1)
         sequence = torch.stack(step_embeddings, dim=1)
         return self.temporal(sequence)
 

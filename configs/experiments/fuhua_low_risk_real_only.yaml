@@ -1,0 +1,19 @@
+_base_: ../ablations/real_only.yaml
+experiment_name: fuhua_low_risk_real_only
+output_dir: ./outputs/fuhua_low_risk_real_only
+
+data:
+  scenario: roadnetsz_fuhua
+  roadnetsz_variant: fuhua_2490
+
+env:
+  control_interval: 5
+  episode_horizon: 720
+
+training:
+  collect_episodes: 30
+  bc_epochs: 0
+  eval_every: 3
+
+ppo:
+  total_updates: 60
