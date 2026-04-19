@@ -11,7 +11,46 @@ env:
   episode_horizon: 720
 
 training:
-  collect_episodes: 30
-  world_model_epochs: 30
-  bc_epochs: 8
-  eval_every: 5
+  collect_episodes: 40
+  world_model_epochs: 12
+  world_model_initial_epochs: 12
+  world_model_refresh_epochs: 4
+  world_model_refresh_every: 12
+  world_model_refresh_after_update: 12
+  world_model_refresh_collect_episodes: 1
+  bc_epochs: 0
+  eval_every: 12
+  real_ratio: 0.95
+  model_ratio: 0.03
+  model_warmup_updates: 12
+  model_ratio_ramp_updates: 24
+  model_start_state_strategy: coverage_balanced
+  model_start_state_count: 2
+  model_selection_strategy: prioritized
+  coverage_selection: false
+  max_model_samples_per_update: 128
+  offline_policy_mix:
+    fixed_time: 0.75
+    max_pressure: 0.0
+    random_phase: 0.25
+
+dynamics:
+  horizon: 2
+  train_horizon: 3
+  lambda_uncertainty: 0.2
+  uncertainty_threshold: 0.08
+  uncertainty_mode: threshold_ranked
+  uncertainty_rank_metric: uncertainty
+  uncertainty_keep_topk: 2
+  pessimism_coef: 0.0
+
+ppo:
+  total_updates: 120
+  entropy_coef: 0.02
+
+policy_guidance:
+  enabled: false
+
+decision:
+  enabled: false
+  eval_enabled: false

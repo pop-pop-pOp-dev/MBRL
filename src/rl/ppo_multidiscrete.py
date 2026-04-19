@@ -28,17 +28,30 @@ class TrajectoryStep:
 
 
 
-def compute_targets(steps: List[TrajectoryStep], gamma: float) -> tuple[np.ndarray, np.ndarray]:
-    returns = []
-    advantages = []
-    for step in steps:
-        ret = float(step.reward) + float(gamma) * float(step.next_value) * (1.0 - float(step.done))
-        adv = ret - float(step.value)
-        returns.append(ret)
-        advantages.append(adv)
-    advantages = np.asarray(advantages, dtype=np.float32)
+def compute_targets(
+    steps: List[TrajectoryStep],
+    gamma: float,
+    gae_lambda: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not steps:
+        empty = np.asarray([], dtype=np.float32)
+        return empty, empty
+
+    returns = np.zeros(len(steps), dtype=np.float32)
+    advantages = np.zeros(len(steps), dtype=np.float32)
+    next_advantage = 0.0
+    for idx in range(len(steps) - 1, -1, -1):
+        step = steps[idx]
+        reward = float(step.reward)
+        done = float(step.done)
+        value = float(step.value)
+        next_value = float(step.next_value)
+        delta = reward + float(gamma) * next_value * (1.0 - done) - value
+        next_advantage = delta + float(gamma) * float(gae_lambda) * (1.0 - done) * next_advantage
+        advantages[idx] = next_advantage
+        returns[idx] = advantages[idx] + value
     advantages = (advantages - advantages.mean()) / max(float(advantages.std()), 1e-6)
-    return advantages, np.asarray(returns, dtype=np.float32)
+    return advantages, returns
 
 
 
@@ -57,7 +70,11 @@ def update_ppo(
     if not real_steps:
         return {'policy_loss': 0.0, 'value_loss': 0.0, 'entropy': 0.0}
     old_log_probs = np.asarray([step.log_prob for step in real_steps], dtype=np.float32)
-    advantages, returns = compute_targets(real_steps, gamma=float(cfg['gamma']))
+    advantages, returns = compute_targets(
+        real_steps,
+        gamma=float(cfg['gamma']),
+        gae_lambda=float(cfg.get('gae_lambda', 0.95)),
+    )
 
     clip_ratio = float(cfg['clip_ratio'])
     entropy_coef = float(cfg['entropy_coef'])

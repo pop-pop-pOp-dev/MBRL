@@ -12,7 +12,8 @@ from src.data.offline_dataset import Transition
 def transition_priority_score(transition: Transition, alpha: float, beta: float, metrics: Sequence[str]) -> float:
     score = 0.0
     if 'uncertainty' in metrics:
-        score += float(alpha) * float(transition.uncertainty)
+        # Prefer lower-uncertainty imagined samples during conservative replay selection.
+        score -= float(alpha) * float(transition.uncertainty)
     if 'reward' in metrics:
         score += float(beta) * abs(float(transition.reward))
     if 'queue_proxy' in metrics:

@@ -8,6 +8,19 @@ from src.models.uncertainty_ensemble import DynamicsEnsemble
 
 
 @torch.no_grad()
+def _ranked_score(
+    transition: Dict[str, torch.Tensor | float | Dict[str, float]],
+    metric: str,
+) -> float:
+    if metric == 'reward':
+        return float(transition.get('reward', 0.0))
+    if metric == 'penalized_reward':
+        return float(transition.get('reward', 0.0)) - float(transition.get('uncertainty', 0.0))
+    # Conservative default: keep the least-uncertain imagined transitions.
+    return -float(transition.get('uncertainty', 0.0))
+
+
+@torch.no_grad()
 def rollout_model(
     ensemble: DynamicsEnsemble,
     state: torch.Tensor,
@@ -21,6 +34,8 @@ def rollout_model(
     uncertainty_threshold: float,
     lambda_uncertainty: float,
     uncertainty_mode: str = 'threshold_only',
+    uncertainty_keep_topk: int | None = None,
+    uncertainty_rank_metric: str = 'uncertainty',
     pessimism_coef: float = 0.0,
 ) -> List[Dict[str, torch.Tensor | float | Dict[str, float]]]:
     transitions: List[Dict[str, torch.Tensor | float | Dict[str, float]]] = []
@@ -58,4 +73,12 @@ def rollout_model(
         current_state = rollout_state
         current_mask = next_mask
         history_states.append(rollout_state)
+    ranked_mode = uncertainty_mode in {'threshold_ranked', 'pessimistic_ranked'}
+    keep_topk = None if uncertainty_keep_topk is None else max(int(uncertainty_keep_topk), 0)
+    if ranked_mode and keep_topk and len(transitions) > keep_topk:
+        transitions.sort(
+            key=lambda item: _ranked_score(item, metric=str(uncertainty_rank_metric)),
+            reverse=True,
+        )
+        transitions = transitions[:keep_topk]
     return transitions

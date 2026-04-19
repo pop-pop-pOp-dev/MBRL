@@ -5,7 +5,8 @@ import torch
 
 from src.models.policy_head import MultiDiscretePolicy
 from src.models.value_head import GraphValueHead
-from src.rl.ppo_multidiscrete import TrajectoryStep, update_ppo
+from src.rl.ppo_multidiscrete import TrajectoryStep, compute_targets, update_ppo
+from src.training.train_mbrl_ppo import _effective_model_ratio
 
 
 
@@ -56,3 +57,48 @@ def test_ppo_update_runs():
         device,
     )
     assert 'policy_loss' in stats
+
+
+def test_compute_targets_uses_discounted_returns():
+    steps = [
+        TrajectoryStep(
+            state=np.zeros((2, 5), dtype=np.float32),
+            action_mask=np.ones((2, 4), dtype=np.float32),
+            action=np.array([0, 1], dtype=np.int64),
+            reward=1.0,
+            done=0.0,
+            log_prob=0.0,
+            value=0.5,
+            next_state=np.zeros((2, 5), dtype=np.float32),
+            next_action_mask=np.ones((2, 4), dtype=np.float32),
+            next_value=0.4,
+        ),
+        TrajectoryStep(
+            state=np.zeros((2, 5), dtype=np.float32),
+            action_mask=np.ones((2, 4), dtype=np.float32),
+            action=np.array([1, 2], dtype=np.int64),
+            reward=2.0,
+            done=1.0,
+            log_prob=0.0,
+            value=0.4,
+            next_state=np.zeros((2, 5), dtype=np.float32),
+            next_action_mask=np.ones((2, 4), dtype=np.float32),
+            next_value=0.0,
+        ),
+    ]
+    advantages, returns = compute_targets(steps, gamma=0.9, gae_lambda=1.0)
+    assert advantages.shape == (2,)
+    assert np.allclose(returns, np.asarray([2.8, 2.0], dtype=np.float32), atol=1e-5)
+
+
+def test_effective_model_ratio_respects_warmup_and_ramp():
+    train_cfg = {
+        'model_ratio': 0.06,
+        'model_warmup_updates': 2,
+        'model_ratio_ramp_updates': 3,
+    }
+    assert _effective_model_ratio(train_cfg, update_idx=0, augmentation_enabled=True) == 0.0
+    assert _effective_model_ratio(train_cfg, update_idx=1, augmentation_enabled=True) == 0.0
+    assert np.isclose(_effective_model_ratio(train_cfg, update_idx=2, augmentation_enabled=True), 0.02)
+    assert np.isclose(_effective_model_ratio(train_cfg, update_idx=3, augmentation_enabled=True), 0.04)
+    assert np.isclose(_effective_model_ratio(train_cfg, update_idx=4, augmentation_enabled=True), 0.06)

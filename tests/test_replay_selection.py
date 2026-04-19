@@ -4,7 +4,7 @@ import numpy as np
 
 from src.data.offline_dataset import Transition
 from src.training.replay_buffer import SplitReplayBuffer
-from src.training.sample_selection import select_model_samples
+from src.training.sample_selection import select_model_samples, transition_priority_score
 
 
 
@@ -50,3 +50,11 @@ def test_priority_and_coverage_selection_runs():
         min_fraction=0.1,
     )
     assert len(selected) == 3
+
+
+def test_priority_score_penalizes_high_uncertainty():
+    low_uncertainty = _make_transition(0.5, uncertainty=0.1)
+    high_uncertainty = _make_transition(0.5, uncertainty=0.9)
+    low_score = transition_priority_score(low_uncertainty, alpha=1.0, beta=0.0, metrics=['uncertainty'])
+    high_score = transition_priority_score(high_uncertainty, alpha=1.0, beta=0.0, metrics=['uncertainty'])
+    assert low_score > high_score

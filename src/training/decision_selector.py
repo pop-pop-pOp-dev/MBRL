@@ -25,6 +25,26 @@ class DecisionSelection:
 
 
 @torch.no_grad()
+def _predict_next_state(
+    ensemble: DynamicsEnsemble,
+    history_states: Sequence[torch.Tensor],
+    history_actions: Sequence[torch.Tensor],
+    edge_index: torch.Tensor,
+    edge_attr: torch.Tensor | None,
+    pessimism_coef: float,
+) -> tuple[torch.Tensor, float]:
+    mean_state, var_state = ensemble.predict_mean_var(
+        torch.stack(list(history_states), dim=0),
+        torch.stack(list(history_actions), dim=0),
+        edge_index,
+        edge_attr,
+    )
+    std_state = torch.sqrt(torch.clamp(var_state, min=1e-8))
+    next_state = mean_state - float(pessimism_coef) * std_state
+    return next_state, float(var_state.mean().item())
+
+
+@torch.no_grad()
 def sample_candidate_actions(
     policy: MultiDiscretePolicy,
     node_x: torch.Tensor,
@@ -171,16 +191,19 @@ def score_candidate_action(
 @torch.no_grad()
 def build_action_plans(
     policy: MultiDiscretePolicy,
+    ensemble: DynamicsEnsemble,
     node_x: torch.Tensor,
     edge_index: torch.Tensor,
     edge_attr: torch.Tensor | None,
     action_mask: torch.Tensor,
+    action_mask_fn,
     cfg: Dict,
 ) -> List[List[torch.Tensor]]:
     mode = str(cfg.get('mode', 'first_action_rerank'))
     candidate_count = max(int(cfg.get('candidate_count', 4)), 1)
     horizon = max(int(cfg.get('horizon', 3)), 1)
     future_action_mode = str(cfg.get('future_action_mode', 'greedy'))
+    pessimism_coef = float(cfg.get('pessimism_coef', 0.0))
     if mode != 'sequence_shooting':
         first_actions = sample_candidate_actions(
             policy,
@@ -208,12 +231,35 @@ def build_action_plans(
         plan = [first_action]
         current_state = node_x
         current_mask = action_mask
+        history_states: List[torch.Tensor] = [node_x]
+        history_actions: List[torch.Tensor] = [first_action]
+        current_state, _ = _predict_next_state(
+            ensemble=ensemble,
+            history_states=history_states,
+            history_actions=history_actions,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            pessimism_coef=pessimism_coef,
+        )
+        current_mask = action_mask_fn(current_state)
+        history_states.append(current_state)
         for _ in range(max(horizon - 1, 0)):
             if future_action_mode == 'sample':
                 next_action = policy.sample(current_state, edge_index, edge_attr, current_mask, deterministic=False).actions
             else:
                 next_action = policy.sample(current_state, edge_index, edge_attr, current_mask, deterministic=True).actions
             plan.append(next_action)
+            history_actions.append(next_action)
+            current_state, _ = _predict_next_state(
+                ensemble=ensemble,
+                history_states=history_states,
+                history_actions=history_actions,
+                edge_index=edge_index,
+                edge_attr=edge_attr,
+                pessimism_coef=pessimism_coef,
+            )
+            current_mask = action_mask_fn(current_state)
+            history_states.append(current_state)
         plans.append(plan)
     return plans
 
@@ -234,10 +280,12 @@ def select_action_with_world_model(
 ) -> DecisionSelection:
     plans = build_action_plans(
         policy=policy,
+        ensemble=ensemble,
         node_x=node_x,
         edge_index=edge_index,
         edge_attr=edge_attr,
         action_mask=action_mask,
+        action_mask_fn=action_mask_fn,
         cfg=cfg,
     )
     scores: List[float] = []

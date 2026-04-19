@@ -1,0 +1,10 @@
+_base_: ./fuhua_low_risk_real_only.yaml
+experiment_name: fuhua_real_only_compare
+output_dir: ./outputs/fuhua_real_only_compare
+
+training:
+  collect_episodes: 10
+  eval_every: 12
+
+ppo:
+  total_updates: 120

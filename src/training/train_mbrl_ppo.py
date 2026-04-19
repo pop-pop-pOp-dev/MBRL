@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -47,6 +48,29 @@ def _make_synthetic_reward_fn(cfg: Dict[str, Any], observation_spec):
     def _reward(prev_state: torch.Tensor, next_state: torch.Tensor, actions: torch.Tensor):
         return compute_synthetic_reward_from_states(prev_state, next_state, actions, observation_spec, reward_cfg)
     return _reward
+
+
+def _cfg_with_world_model_epochs(cfg: Dict[str, Any], epochs: int) -> Dict[str, Any]:
+    cfg_copy = deepcopy(cfg)
+    cfg_copy.setdefault('training', {})['world_model_epochs'] = max(int(epochs), 1)
+    return cfg_copy
+
+
+def _effective_model_ratio(train_cfg: Dict[str, Any], update_idx: int, augmentation_enabled: bool) -> float:
+    if not augmentation_enabled:
+        return 0.0
+    base_ratio = max(float(train_cfg.get('model_ratio', 0.0)), 0.0)
+    if base_ratio <= 0.0:
+        return 0.0
+    warmup_updates = max(int(train_cfg.get('model_warmup_updates', 0)), 0)
+    ramp_updates = max(int(train_cfg.get('model_ratio_ramp_updates', 0)), 0)
+    current_update = int(update_idx) + 1
+    if current_update <= warmup_updates:
+        return 0.0
+    if ramp_updates <= 0:
+        return base_ratio
+    ramp_progress = min(float(current_update - warmup_updates) / float(ramp_updates), 1.0)
+    return base_ratio * ramp_progress
 
 
 def _collect_real_trajectory(
@@ -316,6 +340,11 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     dynamics_cfg = cfg.get('dynamics', {})
     decision_cfg = dict(cfg.get('decision', {}))
     model_aug_cfg = dict(cfg.get('model_augmentation', {}))
+    initial_world_model_epochs = int(train_cfg.get('world_model_initial_epochs', train_cfg.get('world_model_epochs', 20)))
+    refresh_world_model_epochs = int(train_cfg.get('world_model_refresh_epochs', max(initial_world_model_epochs // 3, 1)))
+    refresh_every_updates = max(int(train_cfg.get('world_model_refresh_every', train_cfg.get('eval_every', 10))), 1)
+    refresh_collect_episodes = max(int(train_cfg.get('world_model_refresh_collect_episodes', 2)), 1)
+    refresh_after_update = max(int(train_cfg.get('world_model_refresh_after_update', 1)), 1)
 
     policy = MultiDiscretePolicy(
         input_dim=input_dim,
@@ -349,7 +378,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
     ensemble: DynamicsEnsemble | None = None
     if float(train_cfg.get('model_ratio', 0.3)) > 0.0:
         ensemble = build_ensemble(cfg, state_dim=input_dim, max_actions=max_actions, edge_dim=edge_dim, observation_spec=observation_spec)
-        train_world_model(cfg, ensemble, edge_index, edge_attr, offline_transitions, device=device)
+        train_world_model(_cfg_with_world_model_epochs(cfg, initial_world_model_epochs), ensemble, edge_index, edge_attr, offline_transitions, device=device)
         behavior_clone_policy(
             cfg,
             policy,
@@ -394,7 +423,8 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
         retention = 0.0
         start_queue_mean = 0.0
         start_strategy = str(train_cfg.get('model_start_state_strategy', 'real_buffer'))
-        if augmentation_enabled and ensemble is not None and float(train_cfg.get('model_ratio', 0.3)) > 0.0 and len(replay.real_buffer) > 0:
+        effective_model_ratio = _effective_model_ratio(train_cfg, update_idx=update_idx, augmentation_enabled=augmentation_enabled)
+        if augmentation_enabled and ensemble is not None and effective_model_ratio > 0.0 and len(replay.real_buffer) > 0:
             model_start_count = max(1, int(train_cfg.get('model_start_state_count', 4)))
             start_transitions = _select_start_transitions(replay, strategy=start_strategy, model_start_count=model_start_count, observation_spec=observation_spec)
             if start_transitions:
@@ -417,6 +447,8 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     uncertainty_threshold=float(dynamics_cfg.get('uncertainty_threshold', 0.25)),
                     lambda_uncertainty=float(dynamics_cfg.get('lambda_uncertainty', 0.1)),
                     uncertainty_mode=str(dynamics_cfg.get('uncertainty_mode', 'threshold_only')),
+                    uncertainty_keep_topk=int(dynamics_cfg.get('uncertainty_keep_topk', 0)) or None,
+                    uncertainty_rank_metric=str(dynamics_cfg.get('uncertainty_rank_metric', 'uncertainty')),
                     pessimism_coef=float(dynamics_cfg.get('pessimism_coef', 0.0)),
                 )
                 attempted += int(dynamics_cfg.get('horizon', 5))
@@ -471,7 +503,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
         batch_size = int(ppo_cfg.get('rollout_steps', 256))
         real_ratio = float(train_cfg.get('real_ratio', 0.7))
-        model_ratio = float(train_cfg.get('model_ratio', 0.3)) if augmentation_enabled else 0.0
+        model_ratio = _effective_model_ratio(train_cfg, update_idx=update_idx, augmentation_enabled=augmentation_enabled)
         sampled_real: List[Transition] = []
         sampled_model: List[Transition] = []
         if augmentation_enabled:
@@ -527,7 +559,8 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 'sampled_real_count': float(len(sampled_real)),
                 'sampled_model_count': float(len(sampled_model)),
                 'configured_real_ratio': real_ratio,
-                'configured_model_ratio': model_ratio,
+                'configured_model_ratio': float(train_cfg.get('model_ratio', 0.3)),
+                'effective_model_ratio': model_ratio,
                 'actual_model_ratio': float(len(sampled_model)) / float(max(len(sampled_real) + len(sampled_model), 1)),
                 'model_rollout_keep_ratio': retention,
                 'model_start_state_strategy': start_strategy,
@@ -536,6 +569,7 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 'model_selection_strategy': 1.0 if model_selection_strategy in {'prioritized', 'priority_coverage'} else 0.0,
                 'decision_guidance_enabled': decision_guidance_used,
                 'model_augmentation_enabled': 1.0 if augmentation_enabled else 0.0,
+                'model_warmup_active': 1.0 if model_ratio <= 0.0 else 0.0,
             }
         )
         latest = metrics[-1]
@@ -551,15 +585,20 @@ def train_mbrl_ppo(cfg: Dict[str, Any]) -> Dict[str, Any]:
             f"model_buf={int(latest['buffer_model_size'])} "
             f"sampled_real={int(latest['sampled_real_count'])} "
             f"sampled_model={int(latest['sampled_model_count'])} "
+            f"effective_model_ratio={latest['effective_model_ratio']:.4f} "
             f"model_keep={latest['model_rollout_keep_ratio']:.4f} "
             f"elapsed_sec={(datetime.now() - update_begin).total_seconds():.2f}",
             flush=True,
         )
 
-        if ensemble is not None and (update_idx + 1) % max(int(train_cfg.get('eval_every', 10)), 1) == 0:
-            refresh_data = collect_offline_transitions(env, num_episodes=2, cfg=cfg)
+        if (
+            ensemble is not None
+            and (update_idx + 1) >= refresh_after_update
+            and (update_idx + 1) % refresh_every_updates == 0
+        ):
+            refresh_data = collect_offline_transitions(env, num_episodes=refresh_collect_episodes, cfg=cfg)
             offline_transitions.extend(refresh_data)
-            train_world_model(cfg, ensemble, edge_index, edge_attr, offline_transitions, device=device)
+            train_world_model(_cfg_with_world_model_epochs(cfg, refresh_world_model_epochs), ensemble, edge_index, edge_attr, offline_transitions, device=device)
             cleared_model_count = len(replay.model_buffer)
             replay.clear_model()
             print(f"[train] world_model_refresh cleared_model_buffer={cleared_model_count}", flush=True)
